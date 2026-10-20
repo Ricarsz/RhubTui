@@ -1,0 +1,7 @@
+/target
+
+# 打包产物
+packaging/aur/src/
+packaging/aur/pkg/
+packaging/aur/*.pkg.tar.zst
+packaging/aur/*.tar.gz
