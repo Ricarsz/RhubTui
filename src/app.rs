@@ -796,10 +796,14 @@ fn spawn_battery_worker(tx: Sender<Msg>) -> Sender<HidInfo> {
     let (request_tx, request_rx) = mpsc::channel::<HidInfo>();
     thread::spawn(move || {
         while let Ok(hid) = request_rx.recv() {
-            let result = battery::read(&hid).map_err(|error| format!("{error:#}"));
-            let _ = tx.send(Msg::Battery {
-                node: hid.node,
-                result,
+            // 每个设备独立线程：休眠设备超时不会拖住其他设备。
+            let tx = tx.clone();
+            thread::spawn(move || {
+                let result = battery::read(&hid).map_err(|error| format!("{error:#}"));
+                let _ = tx.send(Msg::Battery {
+                    node: hid.node,
+                    result,
+                });
             });
         }
     });
