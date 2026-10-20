@@ -96,6 +96,11 @@ fn list(json: bool) -> Result<()> {
     );
     for peripheral in &snapshot.peripherals {
         let mut extra = Vec::new();
+        extra.push(if peripheral.usb.internal {
+            "内置".to_string()
+        } else {
+            "外接".to_string()
+        });
         if let Some(hid) = &peripheral.hid {
             extra.push(format!("{} {}", hid.node, pages(hid)));
         }
@@ -165,8 +170,14 @@ fn peripheral_json(peripheral: &Peripheral) -> serde_json::Value {
         "name": peripheral.name(),
         "category": category_tag(peripheral.category),
         "speed": peripheral.usb.speed,
+        "usb_version": peripheral.usb.usb_version,
         "serial": peripheral.usb.serial,
         "power_ma": peripheral.usb.power_ma,
+        "internal": peripheral.usb.internal,
+        "parent": peripheral.usb.parent,
+        "parent_name": peripheral.usb.parent_name,
+        "port": peripheral.usb.port,
+        "children": peripheral.usb.children,
         "hid": peripheral.hid.as_ref().map(|hid| json!({
             "node": hid.node,
             "pages": hid.pages.iter().map(|p| format!("0x{p:04X}")).collect::<Vec<_>>(),

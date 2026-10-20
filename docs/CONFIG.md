@@ -36,6 +36,13 @@ theme = "ocean"
 
 `rhubtui doctor` 会逐项检查并给出修复提示。
 
+## 内置与外接
+
+- 每个设备会显示「内置」标记，`i` 可以隐藏/显示它们。
+- 判定依据：设备在 sysfs 里的 `removable`（`fixed`）以及所在根端口的
+  `connect_type`（`hardwired` / `not used`）。接在外部 Hub 后面的设备继承 Hub 的判定。
+- 少数固件把端口标成 `unknown`，这类设备默认按外接处理。
+
 ## 已知限制
 
 - **休眠**：2.4G 键鼠空闲后会休眠，鼠标可能不回应电量命令；移动一下再按 `b`。

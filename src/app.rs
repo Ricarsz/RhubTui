@@ -63,6 +63,7 @@ pub struct App {
     pub quitting: bool,
     pub show_help: bool,
     pub detail_scroll: u16,
+    pub show_internal: bool,
     action_pending: bool,
     last_scan: Instant,
     last_battery_refresh: Instant,
@@ -93,6 +94,7 @@ impl App {
             quitting: false,
             show_help: false,
             detail_scroll: 0,
+            show_internal: true,
             action_pending: false,
             last_scan: Instant::now(),
             last_battery_refresh: Instant::now(),
@@ -145,6 +147,10 @@ impl App {
         Palette::from_name(&self.theme)
     }
 
+    pub fn visible_count(&self) -> usize {
+        self.rows.iter().filter(|row| row.device.is_some()).count()
+    }
+
     pub fn selected_peripheral(&self) -> Option<&Peripheral> {
         let index = self.rows.get(self.selected)?.device?;
         self.snap.peripherals.get(index)
@@ -188,6 +194,7 @@ impl App {
                 .iter()
                 .enumerate()
                 .filter(|(_, p)| p.category == category)
+                .filter(|(_, p)| self.show_internal || !p.usb.internal)
                 .map(|(i, _)| i)
                 .collect();
             if indices.is_empty() {
@@ -229,6 +236,12 @@ impl App {
             truncate(&peripheral.name(), 30),
             Style::default().fg(self.palette().text),
         )];
+        if peripheral.usb.internal {
+            spans.push(Span::styled(
+                " 内置",
+                Style::default().fg(self.palette().faint),
+            ));
+        }
         if let Some((text, color)) = self.badge(peripheral) {
             spans.push(Span::raw("  "));
             spans.push(Span::styled(text, Style::default().fg(color)));
@@ -266,8 +279,12 @@ impl App {
             return Some(("无介质".into(), palette.faint));
         }
 
-        if peripheral.category == Category::Hub && peripheral.usb.maxchild > 0 {
-            return Some((format!("{} 口", peripheral.usb.maxchild), palette.faint));
+        if peripheral.usb.is_hub() {
+            let mut text = format!("{} 端口", peripheral.usb.maxchild);
+            if !peripheral.usb.children.is_empty() {
+                text.push_str(&format!(" · {} 台", peripheral.usb.children.len()));
+            }
+            return Some((text, palette.faint));
         }
         None
     }
@@ -525,6 +542,16 @@ impl App {
                 self.rescan();
                 self.set_status("已刷新", false);
             }
+            KeyCode::Char('i') => {
+                self.show_internal = !self.show_internal;
+                self.rebuild();
+                let text = if self.show_internal {
+                    "显示内置设备"
+                } else {
+                    "隐藏内置设备"
+                };
+                self.set_status(text, false);
+            }
             KeyCode::Char('?') => self.show_help = !self.show_help,
             KeyCode::Char('q') | KeyCode::Esc => self.quitting = true,
             _ => {}
@@ -617,21 +644,67 @@ impl App {
 
         lines.push(kv("VID:PID", peripheral.usb.id()));
         lines.push(kv(
+            "归属",
+            if peripheral.usb.internal {
+                "内置（固定端口）".to_string()
+            } else {
+                "外接".to_string()
+            },
+        ));
+        if !peripheral.usb.manufacturer.is_empty() {
+            lines.push(kv("厂商", peripheral.usb.manufacturer.clone()));
+        }
+        if !peripheral.usb.product.is_empty() {
+            lines.push(kv("型号", peripheral.usb.product.clone()));
+        }
+        lines.push(kv(
             "位置",
             format!(
                 "bus {} · dev {} · {}",
                 peripheral.usb.bus, peripheral.usb.devnum, peripheral.usb.sysfs
             ),
         ));
-        lines.push(kv("速率", speed_label(&peripheral.usb.speed)));
+        if let Some(port) = peripheral.usb.port {
+            let parent = peripheral
+                .usb
+                .parent_name
+                .clone()
+                .unwrap_or_else(|| format!("总线 {}", peripheral.usb.bus));
+            lines.push(kv("端口", format!("{parent} · {port} 号口")));
+        }
+        let version = if peripheral.usb.usb_version.is_empty() {
+            String::new()
+        } else {
+            format!("USB {} · ", peripheral.usb.usb_version)
+        };
+        lines.push(kv(
+            "速率",
+            format!("{version}{}", speed_label(&peripheral.usb.speed)),
+        ));
         if let Some(power) = peripheral.usb.power_ma {
             lines.push(kv("供电", format!("{power} mA")));
         }
         if !peripheral.usb.serial.is_empty() {
             lines.push(kv("序列号", peripheral.usb.serial.clone()));
         }
-        if peripheral.usb.maxchild > 0 {
+        if peripheral.usb.is_hub() {
             lines.push(kv("端口数", peripheral.usb.maxchild.to_string()));
+            if !peripheral.usb.children.is_empty() {
+                let names: Vec<String> = peripheral
+                    .usb
+                    .children
+                    .iter()
+                    .map(|child| {
+                        self.snap
+                            .peripherals
+                            .iter()
+                            .find(|p| &p.usb.sysfs == child)
+                            .map(|p| p.name())
+                            .unwrap_or_else(|| child.clone())
+                    })
+                    .collect();
+                lines.push(kv("下挂", names.join("、")));
+            }
         }
 
         if let Some(hid) = &peripheral.hid {

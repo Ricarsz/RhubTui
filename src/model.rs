@@ -50,6 +50,18 @@ pub struct UsbDev {
     pub class: u8,
     pub power_ma: Option<u32>,
     pub maxchild: u8,
+    /// 内置设备（焊接/固定端口），与外接 U 盘、扩展坞区分。
+    pub internal: bool,
+    /// USB 协议版本，例如 `2.10`。
+    pub usb_version: String,
+    /// 父设备的 sysfs 名（`7-1`），根端口设备为空。
+    pub parent: Option<String>,
+    /// 父设备的产品名，根端口设备为 `None`。
+    pub parent_name: Option<String>,
+    /// 该设备接在父设备的第几号口。
+    pub port: Option<u8>,
+    /// 直接下挂的设备 sysfs 名（Hub/扩展坞）。
+    pub children: Vec<String>,
     pub ifaces: Vec<Iface>,
 }
 
@@ -77,6 +89,10 @@ impl UsbDev {
         } else {
             product.to_string()
         }
+    }
+
+    pub fn is_hub(&self) -> bool {
+        self.class == 0x09
     }
 
     pub fn class_name(&self, class: u8) -> &'static str {

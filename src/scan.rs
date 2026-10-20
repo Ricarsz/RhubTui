@@ -135,6 +135,7 @@ fn scan_usb() -> Vec<UsbDev> {
             speed: read_str(base.join("speed")),
             class: read_hex(base.join("bDeviceClass")) as u8,
             maxchild: read_u64(base.join("maxchild")) as u8,
+            usb_version: read_str(base.join("version")),
             ..Default::default()
         };
 
@@ -170,7 +171,72 @@ fn scan_usb() -> Vec<UsbDev> {
         out.push(dev);
     }
 
+    // 拓扑：父设备、端口号、内置/外接、下挂设备。
+    let mut meta = Vec::with_capacity(out.len());
+    for device in &out {
+        let top = top_level(&device.sysfs);
+        meta.push((
+            parent_of(&device.sysfs),
+            port_of(&device.sysfs),
+            is_internal_device(top, device.bus),
+        ));
+    }
+    for (device, (parent, port, internal)) in out.iter_mut().zip(meta) {
+        device.parent = parent;
+        device.port = port;
+        device.internal = internal;
+    }
+
+    let mut children: HashMap<String, Vec<String>> = HashMap::new();
+    for device in &out {
+        if let Some(parent) = &device.parent {
+            children
+                .entry(parent.clone())
+                .or_default()
+                .push(device.sysfs.clone());
+        }
+    }
+    let names: HashMap<String, String> = out
+        .iter()
+        .map(|device| (device.sysfs.clone(), device.name()))
+        .collect();
+    for device in &mut out {
+        device.children = children.remove(&device.sysfs).unwrap_or_default();
+        device.parent_name = device.parent.as_ref().and_then(|p| names.get(p).cloned());
+    }
+
     out
+}
+
+fn top_level(name: &str) -> &str {
+    name.split('.').next().unwrap_or(name)
+}
+
+fn parent_of(name: &str) -> Option<String> {
+    name.rsplit_once('.').map(|(parent, _)| parent.to_string())
+}
+
+fn port_of(name: &str) -> Option<u8> {
+    name.rsplit(['-', '.']).next()?.parse().ok()
+}
+
+/// 内置判定：顶层设备标记为 fixed，或它所在的根端口不是热插拔口。
+fn is_internal_device(top: &str, bus: u8) -> bool {
+    let removable = read_str(format!("/sys/bus/usb/devices/{top}/removable"));
+    let connect_type = port_of(top)
+        .and_then(|port| {
+            fs::read_to_string(format!(
+                "/sys/bus/usb/devices/usb{bus}/{bus}-0:1.0/usb{bus}-port{port}/connect_type"
+            ))
+            .ok()
+        })
+        .map(|value| value.trim().to_string())
+        .unwrap_or_default();
+    internal_from(&removable, &connect_type)
+}
+
+fn internal_from(removable: &str, connect_type: &str) -> bool {
+    removable == "fixed" || matches!(connect_type, "hardwired" | "not used")
 }
 
 /// `uevent` is `KEY=VALUE` lines; only BUSNUM/DEVNUM are used here.
@@ -560,6 +626,26 @@ mod tests {
     #[test]
     fn ignores_non_usb_paths() {
         assert_eq!(usb_of(Path::new("/sys/devices/platform/foo/bar")), None);
+    }
+
+    #[test]
+    fn splits_usb_topology() {
+        assert_eq!(top_level("7-1.4"), "7-1");
+        assert_eq!(top_level("1-4"), "1-4");
+        assert_eq!(parent_of("7-1.4"), Some("7-1".into()));
+        assert_eq!(parent_of("7-1"), None);
+        assert_eq!(port_of("7-1.4"), Some(4));
+        assert_eq!(port_of("1-4"), Some(4));
+        assert_eq!(port_of("7-1"), Some(1));
+    }
+
+    #[test]
+    fn classifies_internal_devices() {
+        assert!(internal_from("fixed", ""));
+        assert!(internal_from("removable", "not used"));
+        assert!(internal_from("unknown", "hardwired"));
+        assert!(!internal_from("removable", "hotplug"));
+        assert!(!internal_from("unknown", ""));
     }
 
     #[test]

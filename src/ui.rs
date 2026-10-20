@@ -58,7 +58,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect, palette: Palette) {
     ]);
     frame.render_widget(Paragraph::new(title), left);
 
-    let info = format!("{} 个设备 · 自动刷新 ", app.snap.peripherals.len());
+    let info = format!("{} 个设备 · 自动刷新 ", app.visible_count());
     frame.render_widget(
         Paragraph::new(info)
             .alignment(Alignment::Right)
@@ -110,7 +110,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect, palette: Palette) {
 }
 
 fn draw_keys(frame: &mut Frame, area: Rect, palette: Palette) {
-    let hints = " ↑↓/jk 选择   ←→/hl 选分区   m 挂载   u 卸载   e 弹出   b 电量   PgUp/PgDn 滚动   ? 帮助   q 退出";
+    let hints = " ↑↓/jk 选择   ←→/hl 选分区   m 挂载   u 卸载   e 弹出   b 电量   i 内置   PgUp/PgDn 滚动   ? 帮助   q 退出";
     frame.render_widget(
         Paragraph::new(hints).style(Style::default().fg(palette.faint)),
         area,
@@ -135,6 +135,7 @@ fn draw_help(frame: &mut Frame, area: Rect, palette: Palette) {
         Line::from("  PgUp / PgDn   滚动详情"),
         Line::from("  b             重新读取电量"),
         Line::from("  r             立即重新扫描设备"),
+        Line::from("  i             显示 / 隐藏内置设备"),
         Line::from("  ?             显示 / 隐藏本帮助"),
         Line::from("  q / Esc       退出"),
         Line::from(""),
