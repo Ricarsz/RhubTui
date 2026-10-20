@@ -25,10 +25,22 @@ check:
 fmt:
 	$(CARGO) fmt
 
-# 生成 PKGBUILD 使用的源码 tarball（需要已提交的 git 仓库）。
+# 生成 PKGBUILD 使用的源码 tarball。
+# 有 git 时用 git archive（只含已提交内容）；否则退回 tar 打包工作区，
+# 这样在容器/CI 里没有 .git 也能构建。
 dist:
-	git archive --format=tar.gz --prefix=rhubtui-$(VERSION)/ \
-		-o packaging/aur/rhubtui-$(VERSION).tar.gz HEAD
+	@mkdir -p packaging/aur
+	@if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then \
+		git archive --format=tar.gz --prefix=rhubtui-$(VERSION)/ \
+			-o packaging/aur/rhubtui-$(VERSION).tar.gz HEAD; \
+	else \
+		tar --exclude=.git --exclude=target \
+			--exclude=packaging/aur/src --exclude=packaging/aur/pkg \
+			--exclude='packaging/aur/*.tar.gz' \
+			--exclude='packaging/aur/*.pkg.tar.zst' \
+			--transform='s,^\./,rhubtui-$(VERSION)/,' \
+			-czf packaging/aur/rhubtui-$(VERSION).tar.gz .; \
+	fi
 
 # 构建 pacman 包；产物用 paru -U 安装。
 pkg: dist
