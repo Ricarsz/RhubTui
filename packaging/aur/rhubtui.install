@@ -1,0 +1,13 @@
+post_install() {
+  udevadm control --reload 2>/dev/null || true
+  udevadm trigger --subsystem-match=hidraw 2>/dev/null || true
+  echo "RhubTui: 重新插拔 2.4G 接收器后 hidraw 权限生效；挂载功能使用 udisks2。"
+}
+
+post_upgrade() {
+  post_install
+}
+
+post_remove() {
+  udevadm control --reload 2>/dev/null || true
+}
