@@ -28,7 +28,7 @@ jobs:
           chown -R builder:builder "$GITHUB_WORKSPACE"
 
       - name: Build source tarball
-        run: make dist
+        run: sudo -u builder make dist
 
       - name: Build package
         working-directory: packaging/aur
