@@ -1,6 +1,6 @@
 # Maintainer: RhubTui contributors
 pkgname=rhubtui
-pkgver=0.3.1
+pkgver=0.3.2
 pkgrel=1
 pkgdesc="2.4G keyboard/mouse battery, USB peripheral dashboard and mount manager"
 arch=('x86_64' 'aarch64')

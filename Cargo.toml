@@ -1,6 +1,6 @@
 [package]
 name = "rhubtui"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 description = "2.4G 键鼠电量、USB 外设面板与挂载管理"
 license = "MIT"
