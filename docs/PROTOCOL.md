@@ -49,6 +49,15 @@ frame[40] >> 7    充电标志
 report descriptor 里带 Generic Device Controls（page `0x06`）的 Battery Strength
 （usage `0x20`）时，直接读 feature report，取第一个 ≤100 的字节。
 
+## 多 HID 接口
+
+同一接收器可能暴露多个 HID 接口（例如 G75 V2 有 6 个 hidraw 节点）。
+RhubTui 逐个解析 report descriptor：
+
+- 只有带 `0xFF01`、`0xFF31` 或标准电量 feature report 的接口会收到电量请求
+- 其余接口只在详情/JSON 中展示，不发任何报文
+- 电量结果按接口节点（`/dev/hidrawN`）缓存，互不覆盖
+
 ## 参考
 
 - MCHOSE 鼠标协议逆向记录：<https://gitlab.com/unk9201422/Mchose/-/wikis/Protocol-Specification>

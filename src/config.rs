@@ -5,10 +5,10 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
-use serde::Deserialize;
+use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Config {
     /// 设备扫描间隔（毫秒），最小 200。
@@ -17,6 +17,8 @@ pub struct Config {
     pub battery_refresh_secs: u64,
     /// 配色：ocean | forest | sunset。
     pub theme: String,
+    /// 是否启用鼠标（滚轮滚动、点击选择）。
+    pub mouse: bool,
 }
 
 impl Default for Config {
@@ -25,6 +27,7 @@ impl Default for Config {
             scan_interval_ms: 1000,
             battery_refresh_secs: 120,
             theme: "ocean".to_string(),
+            mouse: true,
         }
     }
 }
@@ -37,6 +40,20 @@ impl Config {
             .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
             .unwrap_or_else(|| PathBuf::from(".config"));
         base.join("rhubtui").join("config.toml")
+    }
+
+    /// 写入默认配置；已存在时只有 `force` 才覆盖。
+    pub fn init(force: bool) -> Result<PathBuf> {
+        let path = Self::path();
+        if path.exists() && !force {
+            bail!("配置已存在：{}（加 --force 覆盖）", path.display());
+        }
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("创建目录 {}", parent.display()))?;
+        }
+        let text = toml::to_string_pretty(&Self::default()).context("序列化默认配置失败")?;
+        fs::write(&path, text).with_context(|| format!("写入 {}", path.display()))?;
+        Ok(path)
     }
 
     pub fn load() -> Result<Self> {
@@ -68,6 +85,7 @@ mod tests {
         assert_eq!(config.scan_interval(), Duration::from_millis(1000));
         assert_eq!(config.battery_refresh(), Duration::from_secs(120));
         assert_eq!(config.theme, "ocean");
+        assert!(config.mouse);
     }
 
     #[test]

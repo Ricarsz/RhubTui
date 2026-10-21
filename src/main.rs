@@ -1,5 +1,7 @@
 //! RhubTui — 2.4G 键鼠电量、USB 外设面板与挂载管理。
 
+#![recursion_limit = "256"]
+
 mod app;
 mod battery;
 mod cli;

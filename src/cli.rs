@@ -1,16 +1,18 @@
 //! CLI 子命令。无子命令时由 `main` 启动 TUI。
 
 use std::path::Path;
+use std::process::Command;
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use serde_json::json;
+use unicode_width::UnicodeWidthStr;
 
 use crate::battery;
 use crate::config::Config;
 use crate::hidraw;
-use crate::model::{Category, Disk, Peripheral};
+use crate::model::{Category, Disk, HidInfo, Peripheral};
 use crate::mount;
 use crate::scan::{self, Snapshot};
 
@@ -19,7 +21,7 @@ use crate::scan::{self, Snapshot};
     name = "rhubtui",
     version,
     about = "2.4G 键鼠电量 + USB 外设管理",
-    long_about = "读取 MCHOSE 2.4G 接收器与标准 HID 通道的电量，列出 USB 外设，\
+    long_about = "读取 MCHOSE 2.4G 接收器与标准 HID 通道的电量，列出 USB 外设与拓扑，\
                   并通过 udisks2 挂载/卸载/弹出存储设备。无子命令时启动 TUI。"
 )]
 pub struct Cli {
@@ -60,7 +62,14 @@ pub enum Cmd {
     /// 检查依赖、udev 规则与 hidraw 权限
     Doctor,
     /// 显示配置文件路径与当前值
-    Config,
+    Config {
+        /// 写入默认配置文件
+        #[arg(long)]
+        init: bool,
+        /// 覆盖已有配置文件（配合 --init）
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 pub fn run(cmd: Cmd, json: bool) -> Result<()> {
@@ -76,7 +85,7 @@ pub fn run(cmd: Cmd, json: bool) -> Result<()> {
             decode,
         } => probe(&node, seconds, decode),
         Cmd::Doctor => doctor(json),
-        Cmd::Config => show_config(json),
+        Cmd::Config { init, force } => show_config(init, force, json),
     }
 }
 
@@ -90,45 +99,124 @@ fn list(json: bool) -> Result<()> {
         return Ok(());
     }
 
-    println!(
-        "{:<8} {:<10} {:<8} {:<32} EXTRA",
-        "PORT", "ID", "TYPE", "NAME"
-    );
+    let mut rows = vec![vec![
+        "PORT".to_string(),
+        "LINK".to_string(),
+        "ID".to_string(),
+        "TYPE".to_string(),
+        "PLACE".to_string(),
+        "NAME".to_string(),
+        "EXTRA".to_string(),
+    ]];
     for peripheral in &snapshot.peripherals {
-        let mut extra = Vec::new();
-        extra.push(if peripheral.usb.internal {
-            "内置".to_string()
-        } else {
-            "外接".to_string()
-        });
-        if let Some(hid) = &peripheral.hid {
-            extra.push(format!("{} {}", hid.node, pages(hid)));
-        }
-        for disk in &peripheral.disks {
-            for partition in &disk.partitions {
-                let state = match &partition.mount {
-                    Some(mount) => format!("mounted {}", mount.path),
-                    None => "unmounted".to_string(),
-                };
-                extra.push(format!("{} {}", partition.name, state));
-            }
-            if let Some(mount) = &disk.mount {
-                extra.push(format!("{} mounted {}", disk.name, mount.path));
-            }
-            if disk.partitions.is_empty() {
-                extra.push(format!("{} empty", disk.name));
-            }
-        }
-        println!(
-            "{:<8} {:<10} {:<8} {:<32} {}",
-            peripheral.usb.sysfs,
+        rows.push(vec![
+            peripheral.usb.sysfs.clone(),
+            peripheral.usb.link_label(),
             peripheral.usb.id(),
-            category_tag(peripheral.category),
-            crate::model::truncate(&peripheral.name(), 32),
-            extra.join(" · ")
-        );
+            category_tag(peripheral.category).to_string(),
+            place_tag(peripheral),
+            peripheral.name(),
+            extra_summary(peripheral),
+        ]);
+    }
+
+    let mut widths = vec![0usize; rows[0].len()];
+    for row in &rows {
+        for (index, cell) in row.iter().enumerate() {
+            widths[index] = widths[index].max(UnicodeWidthStr::width(cell.as_str()));
+        }
+    }
+    for row in &rows {
+        let mut line = String::new();
+        for (index, cell) in row.iter().enumerate() {
+            if index + 1 == row.len() {
+                line.push_str(cell);
+            } else {
+                line.push_str(&pad(cell, widths[index] + 2));
+            }
+        }
+        println!("{}", line.trim_end());
     }
     Ok(())
+}
+
+fn pad(text: &str, width: usize) -> String {
+    let mut text = text.to_string();
+    let used = UnicodeWidthStr::width(text.as_str());
+    if used < width {
+        text.push_str(&" ".repeat(width - used));
+    }
+    text
+}
+
+fn place_tag(peripheral: &Peripheral) -> String {
+    let mut tag = peripheral.usb.place.label().to_string();
+    if peripheral.usb.on_dock() {
+        tag.push_str("/坞上");
+    }
+    tag
+}
+
+fn extra_summary(peripheral: &Peripheral) -> String {
+    let mut extra = Vec::new();
+    let supported: Vec<&HidInfo> = peripheral
+        .hids
+        .iter()
+        .filter(|hid| hid.has_battery())
+        .collect();
+    for hid in &supported {
+        extra.push(format!("{} {}", hid.node, hid.protocol_name()));
+    }
+    if peripheral.hids.len() > supported.len() {
+        extra.push(format!("共 {} 个 HID 接口", peripheral.hids.len()));
+    }
+    for disk in &peripheral.disks {
+        for partition in &disk.partitions {
+            let state = match &partition.mount {
+                Some(mount) => format!("mounted {}", mount.path),
+                None => "unmounted".to_string(),
+            };
+            extra.push(format!("{} {}", partition.name, state));
+        }
+        if let Some(mount) = &disk.mount {
+            extra.push(format!("{} mounted {}", disk.name, mount.path));
+        }
+        if disk.partitions.is_empty() {
+            extra.push(format!("{} 无介质", disk.name));
+        }
+    }
+    if let Some(audio) = &peripheral.audio {
+        extra.push(format!("card {} {}", audio.index, audio.id));
+    }
+    for net in &peripheral.nets {
+        extra.push(net.label());
+    }
+    if !peripheral.videos.is_empty() {
+        extra.push(peripheral.videos.join(" "));
+    }
+    if !peripheral.ttys.is_empty() {
+        extra.push(peripheral.ttys.join(" "));
+    }
+    if !peripheral.printers.is_empty() {
+        extra.push(peripheral.printers.join(" "));
+    }
+    if peripheral.usb.is_hub() {
+        extra.push(format!(
+            "{} · {} 口 · {} 台",
+            peripheral
+                .usb
+                .hub_kind
+                .unwrap_or(crate::model::HubKind::Hub)
+                .label(),
+            peripheral.usb.maxchild,
+            peripheral.usb.children.len()
+        ));
+    }
+    if extra.is_empty() {
+        "-".to_string()
+    } else {
+        extra.join(" · ")
+    }
 }
 
 fn peripheral_json(peripheral: &Peripheral) -> serde_json::Value {
@@ -143,57 +231,114 @@ fn peripheral_json(peripheral: &Peripheral) -> serde_json::Value {
                 "model": disk.model,
                 "serial": disk.serial,
                 "removable": disk.removable,
-                "mount": disk.mount.as_ref().map(|m| json!({
-                    "path": m.path,
-                    "read_only": m.read_only,
-                })),
+                "transport": disk.transport,
+                "rotational": disk.rotational,
+                "ptable": disk.ptable,
+                "mount": disk.mount.as_ref().map(mount_json),
                 "partitions": disk.partitions.iter().map(|part| json!({
                     "name": part.name,
                     "path": part.path,
                     "size": part.size,
                     "fstype": part.fstype,
                     "label": part.label,
-                    "mount": part.mount.as_ref().map(|m| json!({
-                        "path": m.path,
-                        "read_only": m.read_only,
-                    })),
+                    "uuid": part.uuid,
+                    "mount": part.mount.as_ref().map(mount_json),
                 })).collect::<Vec<_>>(),
             })
         })
         .collect();
 
     json!({
-        "port": peripheral.usb.sysfs,
+        "sysfs": peripheral.usb.sysfs,
+        "bus": peripheral.usb.bus,
+        "devnum": peripheral.usb.devnum,
+        "port": peripheral.usb.port,
+        "root_port": peripheral.usb.root_port,
+        "depth": peripheral.usb.depth,
+        "chain": peripheral.usb.chain,
+        "place": if peripheral.usb.place.is_internal() { "internal" } else { "external" },
+        "place_reason": peripheral.usb.place_reason,
+        "attachment": peripheral.usb.attachment(),
+        "link": peripheral.usb.link_label(),
+        "dock": peripheral.usb.dock,
+        "hub_kind": peripheral.usb.hub_kind.map(|kind| match kind {
+            crate::model::HubKind::Hub => "hub",
+            crate::model::HubKind::Dock => "dock",
+        }),
+        "controller": peripheral.usb.controller.as_ref().map(|controller| json!({
+            "slot": controller.slot,
+            "driver": controller.driver,
+            "vendor": format!("{:04x}", controller.vendor),
+            "device": format!("{:04x}", controller.device),
+            "buses": controller.buses,
+        })),
         "id": peripheral.usb.id(),
-        "vid": peripheral.usb.vid,
-        "pid": peripheral.usb.pid,
+        "vid": format!("{:04x}", peripheral.usb.vid),
+        "pid": format!("{:04x}", peripheral.usb.pid),
         "name": peripheral.name(),
         "category": category_tag(peripheral.category),
         "speed": peripheral.usb.speed,
         "usb_version": peripheral.usb.usb_version,
+        "bcd_device": peripheral.usb.bcd_device,
+        "manufacturer": peripheral.usb.manufacturer,
+        "product": peripheral.usb.product,
         "serial": peripheral.usb.serial,
         "power_ma": peripheral.usb.power_ma,
-        "internal": peripheral.usb.internal,
+        "authorized": peripheral.usb.authorized,
+        "ltm_capable": peripheral.usb.ltm_capable,
         "parent": peripheral.usb.parent,
         "parent_name": peripheral.usb.parent_name,
-        "port": peripheral.usb.port,
         "children": peripheral.usb.children,
-        "hid": peripheral.hid.as_ref().map(|hid| json!({
+        "interfaces": peripheral.usb.ifaces.iter().map(|iface| json!({
+            "number": iface.number,
+            "class": iface.class,
+            "subclass": iface.subclass,
+            "protocol": iface.protocol,
+            "function": iface.function(),
+            "driver": iface.driver,
+            "endpoints": iface.endpoints,
+        })).collect::<Vec<_>>(),
+        "hids": peripheral.hids.iter().map(|hid| json!({
             "node": hid.node,
+            "iface": hid.iface,
             "pages": hid.pages.iter().map(|p| format!("0x{p:04X}")).collect::<Vec<_>>(),
-            "protocol": if hid.mchose { "mchose-mouse" } else if hid.keyboard { "mchose-keyboard" } else if hid.battery_feature.is_some() { "hid-battery" } else { "none" },
-        })),
+            "protocol": hid.protocol_name(),
+            "battery_supported": hid.has_battery(),
+            "reports": {
+                "cmd": hid.cmd_out,
+                "data": hid.data_out,
+                "in": hid.in_len,
+            },
+        })).collect::<Vec<_>>(),
         "disks": disks,
+        "audio": peripheral.audio.as_ref().map(|audio| json!({
+            "index": audio.index,
+            "id": audio.id,
+            "driver": audio.driver,
+            "name": audio.name,
+            "pcms": audio.pcms,
+        })),
+        "nets": peripheral.nets.iter().map(|net| json!({
+            "name": net.name,
+            "mac": net.mac,
+            "speed_mbps": net.speed_mbps,
+            "state": net.state,
+            "driver": net.driver,
+        })).collect::<Vec<_>>(),
+        "videos": peripheral.videos,
+        "ttys": peripheral.ttys,
+        "printers": peripheral.printers,
     })
 }
 
-fn pages(hid: &crate::model::HidInfo) -> String {
-    let pages: Vec<String> = hid.pages.iter().map(|p| format!("0x{p:04X}")).collect();
-    if pages.is_empty() {
-        "-".to_string()
-    } else {
-        pages.join(",")
-    }
+fn mount_json(mount: &crate::model::MountPoint) -> serde_json::Value {
+    json!({
+        "path": mount.path,
+        "read_only": mount.read_only,
+        "total": mount.total,
+        "free": mount.free,
+        "used_percent": mount.used_pct(),
+    })
 }
 
 fn category_tag(category: Category) -> &'static str {
@@ -201,6 +346,7 @@ fn category_tag(category: Category) -> &'static str {
         Category::Storage => "storage",
         Category::Input => "input",
         Category::Audio => "audio",
+        Category::Network => "network",
         Category::Hub => "hub",
         Category::Other => "other",
     }
@@ -210,12 +356,18 @@ fn category_tag(category: Category) -> &'static str {
 
 fn read_batteries(selector: Option<&str>, json: bool) -> Result<()> {
     let snapshot = scan::scan();
-    let targets: Vec<&Peripheral> = snapshot
+    let targets: Vec<(&Peripheral, &HidInfo)> = snapshot
         .peripherals
         .iter()
-        .filter(|peripheral| peripheral.hid.as_ref().is_some_and(battery::supported))
-        .filter(|peripheral| match selector {
-            Some(selector) => matches_hid(peripheral, selector),
+        .flat_map(|peripheral| {
+            peripheral
+                .hids
+                .iter()
+                .filter(|hid| battery::supported(hid))
+                .map(move |hid| (peripheral, hid))
+        })
+        .filter(|(peripheral, hid)| match selector {
+            Some(selector) => matches_hid(peripheral, hid, selector),
             None => true,
         })
         .collect();
@@ -224,24 +376,43 @@ fn read_batteries(selector: Option<&str>, json: bool) -> Result<()> {
         bail!("没有找到可读电量的设备（MCHOSE 接收器或标准 HID 电量通道）");
     }
 
+    // 并行读取：休眠鼠标最坏要等 6 秒，不能让它拖住键盘。
+    let results: Vec<Result<crate::mchose::Status>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = targets
+            .iter()
+            .map(|(_, hid)| {
+                let hid = (*hid).clone();
+                scope.spawn(move || battery::read(&hid))
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|_| Err(anyhow!("电量读取线程崩溃")))
+            })
+            .collect()
+    });
+
     let mut readings = Vec::new();
-    let mut errors = Vec::new();
-    for peripheral in targets {
-        let hid = peripheral.hid.as_ref().unwrap();
-        match battery::read(hid) {
-            Ok(status) => readings.push((peripheral, status)),
-            Err(error) => errors.push(format!("{}：{error:#}", peripheral.name())),
+    for ((peripheral, hid), result) in targets.into_iter().zip(results) {
+        match result {
+            Ok(status) => readings.push((peripheral, hid, status)),
+            Err(error) => eprintln!("rhubtui: {} ({})：{error:#}", peripheral.name(), hid.node),
         }
     }
 
     if json {
         let values: Vec<_> = readings
             .iter()
-            .map(|(peripheral, status)| {
+            .map(|(peripheral, hid, status)| {
                 json!({
                     "device": peripheral.name(),
-                    "port": peripheral.usb.sysfs,
-                    "node": peripheral.hid.as_ref().map(|h| h.node.clone()),
+                    "sysfs": peripheral.usb.sysfs,
+                    "node": hid.node,
+                    "iface": hid.iface,
+                    "protocol": hid.protocol_name(),
                     "percent": status.battery,
                     "charging": status.charging,
                     "polling_hz": status.polling_hz,
@@ -250,7 +421,7 @@ fn read_batteries(selector: Option<&str>, json: bool) -> Result<()> {
             .collect();
         println!("{}", serde_json::to_string_pretty(&values)?);
     } else {
-        for (peripheral, status) in &readings {
+        for (peripheral, hid, status) in &readings {
             let mut extra = Vec::new();
             if status.charging {
                 extra.push("charging".to_string());
@@ -258,38 +429,44 @@ fn read_batteries(selector: Option<&str>, json: bool) -> Result<()> {
             if let Some(hz) = status.polling_hz {
                 extra.push(format!("{hz}Hz"));
             }
-            let node = peripheral
-                .hid
-                .as_ref()
-                .map(|h| h.node.as_str())
-                .unwrap_or("-");
             println!(
-                "{:<14} {:>3}%  {:<20} {}",
-                node,
+                "{:<14} {:>3}%  {:<18} {}",
+                hid.node,
                 status.battery,
                 extra.join(" "),
-                crate::model::truncate(&peripheral.name(), 34)
+                crate::model::truncate_cols(&peripheral.name(), 40)
             );
         }
     }
 
-    for error in &errors {
-        eprintln!("rhubtui: {error}");
-    }
     if readings.is_empty() {
         bail!("所有设备都读取失败");
     }
     Ok(())
 }
 
-fn matches_hid(peripheral: &Peripheral, selector: &str) -> bool {
-    if peripheral.usb.sysfs == selector || peripheral.usb.id() == selector {
+fn matches_hid(peripheral: &Peripheral, hid: &HidInfo, selector: &str) -> bool {
+    let selector = selector.trim().to_lowercase();
+    if selector == peripheral.usb.sysfs
+        || selector == peripheral.usb.id()
+        || normalize_id(&selector) == peripheral.usb.id()
+    {
         return true;
     }
-    peripheral
-        .hid
-        .as_ref()
-        .is_some_and(|hid| hid.node == selector || hid.node.trim_start_matches("/dev/") == selector)
+    let node = hid.node.trim_start_matches("/dev/").to_lowercase();
+    let selector = selector.trim_start_matches("/dev/");
+    selector == node || selector == hid.node.to_lowercase()
+}
+
+fn normalize_id(selector: &str) -> String {
+    let Some((vid, pid)) = selector.split_once(':') else {
+        return selector.to_string();
+    };
+    format!("{:04x}:{:04x}", parse_hex(vid), parse_hex(pid))
+}
+
+fn parse_hex(text: &str) -> u16 {
+    u16::from_str_radix(text.trim().trim_start_matches("0x"), 16).unwrap_or(0)
 }
 
 // ─── mount / umount / eject ─────────────────────────────────────────────────
@@ -380,7 +557,12 @@ fn find_mount_target(snapshot: &Snapshot, selector: &str) -> Result<(String, Str
                     };
                     return Ok((disk.path.clone(), label));
                 }
-                bail!("{} 有分区，请指定分区（如 {}{}）", disk.path, disk.name, 1);
+                let example = disk
+                    .partitions
+                    .first()
+                    .map(|partition| partition.path.clone())
+                    .unwrap_or_else(|| format!("{}{}", disk.path, 1));
+                bail!("{} 有分区，请指定分区（如 {}）", disk.path, example);
             }
         }
     }
@@ -411,7 +593,7 @@ fn find_first_mount_target(snapshot: &Snapshot) -> Result<(String, String)> {
             }
         }
     }
-    whole_disk.ok_or_else(|| anyhow::anyhow!("没有可挂载的存储设备"))
+    whole_disk.ok_or_else(|| anyhow!("没有可挂载的存储设备"))
 }
 
 fn find_mounted(snapshot: &Snapshot, selector: &str) -> Result<String> {
@@ -469,14 +651,19 @@ fn find_disk<'a>(snapshot: &'a Snapshot, selector: &str) -> Result<&'a Disk> {
 }
 
 fn find_first_idle_disk(snapshot: &Snapshot) -> Result<&Disk> {
+    let mut empty = None;
     for peripheral in &snapshot.peripherals {
         for disk in &peripheral.disks {
-            if !disk.mounted() && disk.size > 0 {
+            if disk.mounted() {
+                continue;
+            }
+            if disk.size > 0 {
                 return Ok(disk);
             }
+            empty.get_or_insert(disk);
         }
     }
-    bail!("没有可弹出的磁盘")
+    empty.ok_or_else(|| anyhow!("没有可弹出的磁盘"))
 }
 
 fn matches_device(selector: &str, path: &str, name: &str) -> bool {
@@ -533,6 +720,15 @@ fn doctor(json: bool) -> Result<()> {
     checks.push(tool_check("lsblk", true));
     checks.push(tool_check("udisksctl", true));
 
+    let (service_ok, service_detail) = udisks_service();
+    checks.push(Check {
+        name: "udisks2 服务",
+        ok: service_ok,
+        detail: service_detail,
+        hint: Some("sudo systemctl enable --now udisks2"),
+        required: false,
+    });
+
     let rule_paths = [
         "/usr/lib/udev/rules.d/70-rhubtui.rules",
         "/etc/udev/rules.d/70-rhubtui.rules",
@@ -549,10 +745,10 @@ fn doctor(json: bool) -> Result<()> {
     });
 
     let snapshot = scan::scan();
-    let hid_targets: Vec<_> = snapshot
+    let hid_targets: Vec<&HidInfo> = snapshot
         .peripherals
         .iter()
-        .filter_map(|peripheral| peripheral.hid.as_ref())
+        .flat_map(|peripheral| peripheral.hids.iter())
         .filter(|hid| battery::supported(hid))
         .collect();
     if hid_targets.is_empty() {
@@ -569,7 +765,14 @@ fn doctor(json: bool) -> Result<()> {
             checks.push(Check {
                 name: "hidraw 权限",
                 ok: writable,
-                detail: format!("{}（{}）", hid.node, protocol_name(hid)),
+                detail: format!(
+                    "{}（{} · {}）",
+                    hid.node,
+                    hid.protocol_name(),
+                    hid.iface
+                        .map(|iface| format!("iface {iface}"))
+                        .unwrap_or_else(|| "iface ?".into())
+                ),
                 hint: Some("安装 udev 规则后重新插拔接收器"),
                 required: false,
             });
@@ -585,6 +788,27 @@ fn doctor(json: bool) -> Result<()> {
         } else {
             format!("使用默认值（{}）", Config::path().display())
         },
+        hint: Some("rhubtui config --init"),
+        required: false,
+    });
+
+    checks.push(Check {
+        name: "设备枚举",
+        ok: true,
+        detail: format!(
+            "{} 个 USB 设备 · {} 个内置 · {} 个扩展坞",
+            snapshot.peripherals.len(),
+            snapshot
+                .peripherals
+                .iter()
+                .filter(|p| p.usb.place.is_internal())
+                .count(),
+            snapshot
+                .peripherals
+                .iter()
+                .filter(|p| p.usb.hub_kind == Some(crate::model::HubKind::Dock))
+                .count()
+        ),
         hint: None,
         required: false,
     });
@@ -608,6 +832,7 @@ fn doctor(json: bool) -> Result<()> {
                     "scan_interval_ms": config.scan_interval_ms,
                     "battery_refresh_secs": config.battery_refresh_secs,
                     "theme": config.theme,
+                    "mouse": config.mouse,
                 },
                 "checks": values,
             }))?
@@ -639,16 +864,21 @@ fn doctor(json: bool) -> Result<()> {
     Ok(())
 }
 
-fn protocol_name(hid: &crate::model::HidInfo) -> &'static str {
-    if hid.mchose {
-        "mchose mouse"
-    } else if hid.keyboard {
-        "mchose keyboard"
-    } else if hid.battery_feature.is_some() {
-        "hid battery"
-    } else {
-        "unknown"
+/// udisks2 由 D-Bus 按需激活，`inactive` 不代表不可用。
+fn udisks_service() -> (bool, String) {
+    let active = Command::new("systemctl")
+        .args(["is-active", "udisks2"])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false);
+    if active {
+        return (true, "active".to_string());
     }
+    let dbus = Path::new("/usr/share/dbus-1/system-services/org.freedesktop.UDisks2.service");
+    if dbus.exists() {
+        return (true, "未运行 · D-Bus 按需激活".to_string());
+    }
+    (false, "未启用且缺少 D-Bus 服务文件".to_string())
 }
 
 fn tool_check(name: &'static str, required: bool) -> Check {
@@ -679,7 +909,13 @@ fn find_in_path(name: &str) -> Option<std::path::PathBuf> {
 
 // ─── config ─────────────────────────────────────────────────────────────────
 
-fn show_config(json: bool) -> Result<()> {
+fn show_config(init: bool, force: bool, json: bool) -> Result<()> {
+    if init {
+        let path = Config::init(force)?;
+        if !json {
+            println!("已写入默认配置 {}", path.display());
+        }
+    }
     let config = Config::load()?;
     if json {
         println!(
@@ -689,6 +925,7 @@ fn show_config(json: bool) -> Result<()> {
                 "scan_interval_ms": config.scan_interval_ms,
                 "battery_refresh_secs": config.battery_refresh_secs,
                 "theme": config.theme,
+                "mouse": config.mouse,
                 "themes": crate::theme::Palette::NAMES,
             }))?
         );
@@ -701,6 +938,7 @@ fn show_config(json: bool) -> Result<()> {
             config.theme,
             crate::theme::Palette::NAMES.join(" / ")
         );
+        println!("  mouse                {}", config.mouse);
     }
     Ok(())
 }

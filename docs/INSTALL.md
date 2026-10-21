@@ -57,6 +57,15 @@ sudo udevadm trigger --subsystem-match=hidraw
 
 重新插拔 2.4G 接收器后，电量读取才有权限。
 
+## 配置（可选）
+
+```bash
+rhubtui config --init          # 写入默认配置
+rhubtui config                 # 查看路径和当前值
+```
+
+配置项见 [配置与限制](CONFIG.md)。不创建配置文件也能正常使用。
+
 ## 权限
 
 - **电量**：需要 `/dev/hidraw*` 读写权限，由 udev 规则给当前登录会话打 `uaccess`。

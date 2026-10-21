@@ -50,5 +50,5 @@ pub fn read(hid: &HidInfo) -> Result<Status> {
 
 /// 该接口是否有电量后端。
 pub fn supported(hid: &HidInfo) -> bool {
-    hid.mchose || hid.keyboard || hid.battery_feature.is_some()
+    hid.has_battery()
 }

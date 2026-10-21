@@ -39,7 +39,7 @@ fn hint(error: &str) -> &'static str {
     if lower.contains("no such file") || lower.contains("not found") {
         "\n提示：未安装 udisks2（pacman -S udisks2）"
     } else if lower.contains("serviceunknown") || lower.contains("not been activated") {
-        "\n提示：udisks2 未启用：sudo systemctl enable --now udisks2"
+        "\n提示：udisks2 未运行，可 sudo systemctl start udisks2（D-Bus 通常会自动激活）"
     } else if lower.contains("not authorized") {
         "\n提示：需要 polkit 授权，且要在活动本地会话中运行"
     } else {
