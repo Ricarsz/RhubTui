@@ -287,6 +287,24 @@ impl UsbDev {
         )
     }
 
+    /// 面向普通用户的位置描述：不暴露父设备名和层级。
+    pub fn friendly_attachment(&self) -> String {
+        if self.place.is_internal() {
+            return "主板内置".into();
+        }
+        if self.depth == 0 {
+            return "直连主机".into();
+        }
+        let port = self
+            .port
+            .map(|port| format!("{port} 号口"))
+            .unwrap_or_else(|| "下行口".into());
+        match self.hub_kind {
+            Some(HubKind::Dock) => format!("扩展坞 {port}"),
+            _ => format!("Hub {port}"),
+        }
+    }
+
     /// 列表中使用的短连接描述：`根端口 2` / `Hub 7-1 · 4 号口`。
     pub fn link_label(&self) -> String {
         if self.depth == 0 {
@@ -337,6 +355,11 @@ impl HidInfo {
 
     pub fn has_battery(&self) -> bool {
         self.mchose || self.keyboard || self.battery_feature.is_some()
+    }
+
+    /// 已确认的 2.4G 接收器通道：厂商协议本身只在无线链路上出现。
+    pub fn wireless(&self) -> bool {
+        self.mchose || self.keyboard
     }
 }
 
@@ -459,6 +482,10 @@ pub enum Battery {
         pct: u8,
         charging: bool,
         hz: Option<u32>,
+        /// MCHOSE 鼠标 `0xE2` 状态包里的当前 DPI 档位。
+        dpi: Option<u8>,
+        /// `Some(true)` 为 2.4G，`Some(false)` 为 USB 有线，`None` 未上报。
+        wireless: Option<bool>,
     },
     Err(String),
 }
@@ -481,6 +508,30 @@ impl Battery {
     pub fn pct(&self) -> Option<u8> {
         match self {
             Battery::Ok { pct, .. } => Some(*pct),
+            _ => None,
+        }
+    }
+
+    /// 读到的回报率；键盘等没有该字段的协议返回 `None`。
+    pub fn hz(&self) -> Option<u32> {
+        match self {
+            Battery::Ok { hz, .. } => *hz,
+            _ => None,
+        }
+    }
+
+    /// 当前 DPI 档位；非 MCHOSE 鼠标返回 `None`。
+    pub fn dpi(&self) -> Option<u8> {
+        match self {
+            Battery::Ok { dpi, .. } => *dpi,
+            _ => None,
+        }
+    }
+
+    /// `0xE2` 上报的连接方式：`Some(true)` 2.4G，`Some(false)` USB 有线。
+    pub fn wireless(&self) -> Option<bool> {
+        match self {
+            Battery::Ok { wireless, .. } => *wireless,
             _ => None,
         }
     }
@@ -515,6 +566,30 @@ impl Peripheral {
     /// 第一个带有电量后端的 HID 接口。
     pub fn battery_hid(&self) -> Option<&HidInfo> {
         self.hids.iter().find(|hid| hid.has_battery())
+    }
+
+    /// 面向用户的设备类型：优先按 HID 用途细分键鼠，拿不到时退回大类。
+    pub fn kind_label(&self) -> &'static str {
+        let has_iface = |subclass: u8, protocol: u8| {
+            self.usb.ifaces.iter().any(|iface| {
+                iface.class == 0x03 && iface.subclass == subclass && iface.protocol == protocol
+            })
+        };
+        if self.hids.iter().any(|hid| hid.keyboard) || has_iface(0x01, 0x01) {
+            "键盘"
+        } else if self.hids.iter().any(|hid| hid.mchose) || has_iface(0x01, 0x02) {
+            "鼠标"
+        } else {
+            self.category.title()
+        }
+    }
+
+    /// 已确认的无线连接方式；非 MCHOSE 接收器不做猜测。
+    pub fn connection(&self) -> Option<&'static str> {
+        self.hids
+            .iter()
+            .any(HidInfo::wireless)
+            .then_some("2.4G 无线")
     }
 
     /// 所有功能节点的一行摘要，用于列表徽标。
@@ -671,9 +746,13 @@ mod tests {
             pct: 88,
             charging: true,
             hz: Some(1000),
+            dpi: Some(2),
+            wireless: Some(true),
         };
         assert_eq!(b.label(), "88%+");
         assert_eq!(b.pct(), Some(88));
+        assert_eq!(b.dpi(), Some(2));
+        assert_eq!(b.wireless(), Some(true));
     }
 
     #[test]
@@ -712,5 +791,86 @@ mod tests {
         };
         assert!(dev.attachment().contains("直连根端口 2"));
         assert_eq!(dev.link_label(), "根端口 2");
+    }
+
+    fn hid(keyboard: bool, mchose: bool) -> HidInfo {
+        HidInfo {
+            node: "/dev/hidraw0".into(),
+            iface: None,
+            pages: Vec::new(),
+            mchose,
+            cmd_out: 20,
+            data_out: 64,
+            in_len: 20,
+            battery_feature: None,
+            keyboard,
+        }
+    }
+
+    fn input(hids: Vec<HidInfo>, ifaces: Vec<Iface>) -> Peripheral {
+        Peripheral {
+            usb: UsbDev {
+                ifaces,
+                ..Default::default()
+            },
+            hids,
+            audio: None,
+            nets: Vec::new(),
+            videos: Vec::new(),
+            ttys: Vec::new(),
+            printers: Vec::new(),
+            disks: Vec::new(),
+            category: Category::Input,
+        }
+    }
+
+    #[test]
+    fn friendly_attachment_hides_bus_names() {
+        let dev = UsbDev {
+            depth: 1,
+            port: Some(4),
+            parent: Some("7-1".into()),
+            parent_name: Some("USB2.1 Hub".into()),
+            ..Default::default()
+        };
+        assert_eq!(dev.friendly_attachment(), "Hub 4 号口");
+        let dev = UsbDev {
+            depth: 1,
+            port: Some(1),
+            hub_kind: Some(HubKind::Dock),
+            ..Default::default()
+        };
+        assert_eq!(dev.friendly_attachment(), "扩展坞 1 号口");
+        let dev = UsbDev {
+            root_port: Some(2),
+            ..Default::default()
+        };
+        assert_eq!(dev.friendly_attachment(), "直连主机");
+    }
+
+    #[test]
+    fn overview_labels_keyboard_and_mouse() {
+        let keyboard = input(vec![hid(true, false)], Vec::new());
+        assert_eq!(keyboard.kind_label(), "键盘");
+        assert_eq!(keyboard.connection(), Some("2.4G 无线"));
+
+        let mouse = input(vec![hid(false, true)], Vec::new());
+        assert_eq!(mouse.kind_label(), "鼠标");
+        assert_eq!(mouse.connection(), Some("2.4G 无线"));
+    }
+
+    #[test]
+    fn overview_falls_back_to_interfaces() {
+        let ifaces = vec![Iface {
+            number: 0,
+            class: 0x03,
+            subclass: 0x01,
+            protocol: 0x02,
+            endpoints: 1,
+            driver: String::new(),
+        }];
+        let mouse = input(Vec::new(), ifaces);
+        assert_eq!(mouse.kind_label(), "鼠标");
+        assert_eq!(mouse.connection(), None);
     }
 }

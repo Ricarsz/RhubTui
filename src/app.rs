@@ -80,6 +80,8 @@ pub struct App {
     pub status_at: Instant,
     pub quitting: bool,
     pub show_help: bool,
+    /// 详情面板是否显示技术细节；默认关闭，按 `a` 切换。
+    pub advanced: bool,
     pub help_scroll: u16,
     pub detail_scroll: u16,
     pub detail_max: u16,
@@ -132,6 +134,7 @@ impl App {
             status_at: Instant::now(),
             quitting: false,
             show_help: false,
+            advanced: false,
             help_scroll: 0,
             detail_scroll: 0,
             detail_max: 0,
@@ -861,6 +864,16 @@ impl App {
             KeyCode::Char('K') => self.scroll_details(-1),
             KeyCode::Char('/') => self.begin_filter(),
             KeyCode::Char('b') => self.refresh_batteries(),
+            KeyCode::Char('a') => {
+                self.advanced = !self.advanced;
+                self.detail_scroll = 0;
+                let text = if self.advanced {
+                    "详情：高级信息"
+                } else {
+                    "详情：概览"
+                };
+                self.set_status(text, false);
+            }
             KeyCode::Char('r') => {
                 self.request_scan();
                 self.set_status("正在刷新设备…", false);
@@ -1003,6 +1016,8 @@ impl App {
                         pct: status.battery,
                         charging: status.charging,
                         hz: status.polling_hz,
+                        dpi: status.dpi,
+                        wireless: status.wireless,
                     },
                     Err(error) => Battery::Err(error),
                 };
@@ -1088,7 +1103,16 @@ impl App {
 
     // ─── details pane ──────────────────────────────────────────────────────
 
+    /// 默认展示一眼能看懂的概览，按 `a` 切到技术细节。
     pub fn details(&self) -> Vec<Line<'static>> {
+        if self.advanced {
+            self.details_advanced()
+        } else {
+            self.details_overview()
+        }
+    }
+
+    fn details_advanced(&self) -> Vec<Line<'static>> {
         let palette = self.palette();
         let Some(peripheral) = self.selected_peripheral() else {
             return vec![Line::from(Span::styled(
@@ -1407,6 +1431,161 @@ impl App {
         lines
     }
 
+    /// 面向普通用户的概览：设备名、电量、连接方式，以及少量关键信息。
+    fn details_overview(&self) -> Vec<Line<'static>> {
+        let palette = self.palette();
+        let Some(peripheral) = self.selected_peripheral() else {
+            return vec![Line::from(Span::styled(
+                "没有检测到外设",
+                Style::default().fg(palette.faint),
+            ))];
+        };
+
+        let usb = &peripheral.usb;
+        let battery_hid = peripheral.battery_hid();
+        let wireless = battery_hid.and_then(|hid| self.battery_of(hid).wireless());
+        let connection = match wireless {
+            Some(true) => Some("2.4G 无线"),
+            Some(false) => Some("USB 有线"),
+            None => peripheral.connection(),
+        };
+
+        let mut lines = Vec::new();
+        lines.push(Line::from(Span::styled(
+            peripheral.name(),
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        let mut tags = vec![peripheral.kind_label().to_string()];
+        if let Some(connection) = connection {
+            tags.push(connection.to_string());
+        }
+        tags.push(usb.place.label().to_string());
+        if usb.on_dock() {
+            tags.push("经扩展坞".into());
+        }
+        lines.push(Line::from(Span::styled(
+            tags.join(" · "),
+            Style::default().fg(palette.accent),
+        )));
+        lines.push(Line::from(""));
+
+        if let Some(hid) = battery_hid {
+            lines.push(section_title("电量", palette));
+            match self.battery_of(hid) {
+                Battery::Ok { pct, charging, .. } => {
+                    lines.push(Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(
+                            battery_bar(pct, 16),
+                            Style::default()
+                                .fg(battery_color(pct, palette))
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]));
+                    let (state, color) = if charging {
+                        ("充电中", palette.good)
+                    } else {
+                        ("使用中", palette.dim)
+                    };
+                    lines.push(Line::from(Span::styled(
+                        format!("  {state}"),
+                        Style::default().fg(color),
+                    )));
+                }
+                Battery::Loading => lines.push(Line::from(Span::styled(
+                    "  读取中…",
+                    Style::default().fg(palette.faint),
+                ))),
+                Battery::Unknown => lines.push(Line::from(Span::styled(
+                    "  未检测到电量通道",
+                    Style::default().fg(palette.faint),
+                ))),
+                Battery::Err(error) => lines.push(Line::from(Span::styled(
+                    format!("  读取失败：{error}"),
+                    Style::default().fg(palette.bad),
+                ))),
+            }
+            lines.push(Line::from(""));
+        }
+
+        let mut rows: Vec<(&str, String)> = Vec::new();
+        rows.push(("类型", peripheral.kind_label().to_string()));
+        if let Some(connection) = connection {
+            rows.push(("连接", connection.to_string()));
+        }
+        if let Some(dpi) = battery_hid.and_then(|hid| self.battery_of(hid).dpi()) {
+            rows.push(("DPI档位", format!("{dpi} 档")));
+        }
+        if let Some(hz) = battery_hid.and_then(|hid| self.battery_of(hid).hz())
+            && wireless != Some(true)
+        {
+            rows.push(("回报率", format!("{hz} Hz")));
+        }
+        rows.push(("位置", usb.friendly_attachment()));
+
+        if !peripheral.disks.is_empty() {
+            let partitions: usize = peripheral
+                .disks
+                .iter()
+                .map(|disk| disk.partitions.len())
+                .sum();
+            let mounted = peripheral.disks.iter().any(Disk::mounted);
+            rows.push((
+                "存储",
+                format!(
+                    "{partitions} 个分区 · {}",
+                    if mounted { "已挂载" } else { "未挂载" }
+                ),
+            ));
+            let mount_point = peripheral.disks.iter().find_map(|disk| {
+                disk.mount
+                    .as_ref()
+                    .or_else(|| disk.partitions.iter().find_map(|part| part.mount.as_ref()))
+            });
+            if let Some(mount) = mount_point {
+                let mut value = mount.path.clone();
+                if let Some(usage) = mount.usage_label() {
+                    value.push_str(&format!(" · {usage}"));
+                }
+                if mount.read_only {
+                    value.push_str(" (ro)");
+                }
+                rows.push(("挂载", value));
+            }
+        }
+
+        if let Some(audio) = &peripheral.audio {
+            rows.push(("音频", format!("card {} · {}", audio.index, audio.name)));
+        }
+        if let Some(net) = peripheral.nets.first() {
+            rows.push(("网络", net.label()));
+        }
+        if usb.is_hub() {
+            rows.push((
+                "扩展坞",
+                format!(
+                    "{} · {} 台下挂",
+                    usb.hub_kind.unwrap_or(HubKind::Hub).label(),
+                    usb.children.len()
+                ),
+            ));
+        }
+
+        if !rows.is_empty() {
+            lines.push(section_title("关键信息", palette));
+            for (key, value) in rows {
+                lines.push(kv(key, value));
+            }
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  a 查看高级详情 · b 重新读取电量 · r 重新扫描",
+            Style::default().fg(palette.faint),
+        )));
+        lines
+    }
+
     fn chain_of(&self, peripheral: &Peripheral) -> String {
         let usb = &peripheral.usb;
         let mut parts = Vec::new();
@@ -1440,7 +1619,9 @@ impl App {
             Style::default().fg(palette.dim),
         )];
         match self.battery_of(hid) {
-            Battery::Ok { pct, charging, hz } => {
+            Battery::Ok {
+                pct, charging, hz, ..
+            } => {
                 spans.push(Span::styled(
                     battery_bar(pct, 10),
                     Style::default().fg(battery_color(pct, palette)),

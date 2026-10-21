@@ -133,7 +133,12 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect, palette: Palette) {
 }
 
 fn draw_details(frame: &mut Frame, app: &mut App, area: Rect, palette: Palette) {
-    let block = panel(" 详情 ", palette);
+    let title = if app.advanced {
+        " 详情 · 高级 "
+    } else {
+        " 概览 "
+    };
+    let block = panel(title, palette);
     let inner = block.inner(area);
     let lines = app.details();
     let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
@@ -179,6 +184,7 @@ fn draw_keys(frame: &mut Frame, app: &App, area: Rect, palette: Palette) {
         "/ 过滤",
         "i 内置",
         "b 电量",
+        "a 详情",
         "t 主题",
         "? 帮助",
         "q 退出",
@@ -268,6 +274,7 @@ fn draw_help(frame: &mut Frame, app: &mut App, area: Rect, palette: Palette) {
         Line::from("  Ctrl+D / Ctrl+U   滚动详情"),
         Line::from("  /               按名称/端口/VID:PID 过滤"),
         Line::from("  b               重新读取电量"),
+        Line::from("  a               切换概览 / 高级详情"),
         Line::from("  r               立即重新扫描设备"),
         Line::from("  i               显示 / 隐藏内置设备"),
         Line::from("  t               切换主题"),

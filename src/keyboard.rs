@@ -37,6 +37,8 @@ pub fn parse(data: &[u8]) -> Option<Status> {
         charging: raw & 0x80 != 0,
         polling_hz: None,
         name: String::new(),
+        wireless: None,
+        dpi: None,
         sleeping: false,
     })
 }

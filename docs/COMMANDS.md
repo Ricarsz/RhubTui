@@ -83,7 +83,9 @@ rhubtui config --init
     "protocol": "MCHOSE 鼠标",
     "percent": 96,
     "charging": false,
-    "polling_hz": 1000
+    "polling_hz": 1000,
+    "dpi_level": 2,
+    "wireless": true
   }
 ]
 ```
@@ -101,6 +103,7 @@ rhubtui config --init
 | `m` / `u` | 挂载 / 卸载 |
 | `e` | 安全弹出（弹确认框，`y`/Enter 确认） |
 | `b` | 重新读取电量 |
+| `a` | 详情在「概览 / 高级信息」间切换 |
 | `i` | 显示 / 隐藏内置设备 |
 | `r` | 立即重新扫描 |
 | `/` | 按名称/端口/VID:PID/卷标过滤 |

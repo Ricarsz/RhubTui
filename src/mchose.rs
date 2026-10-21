@@ -2,9 +2,9 @@
 //!
 //! There is no battery command in this protocol. The device pushes a status
 //! event (report 0x13, payload 0xE2) that carries battery, charge state,
-//! polling rate and the device name. Sending `0x0B 0xAA` (reload profile from
-//! EEPROM) makes the firmware emit that event, which is how the vendor web
-//! driver gets the battery on every connect.
+//! connection mode, DPI level, polling rate and the device name. Sending
+//! `0x0B 0xAA` (reload profile from EEPROM) makes the firmware emit that
+//! event, which is how the vendor web driver gets the battery on every connect.
 //!
 //! Transport notes (they matter):
 //! * every payload byte is XORed with 0xFF; the report ID is not,
@@ -36,6 +36,10 @@ pub struct Status {
     pub charging: bool,
     pub polling_hz: Option<u32>,
     pub name: String,
+    /// `0xE2` 状态包里的连接方式：`true` 为 2.4G，`false` 为 USB 有线。
+    pub wireless: Option<bool>,
+    /// `0xE2` 状态包里的当前 DPI 档位（1..=6）。
+    pub dpi: Option<u8>,
     /// Device is in sleep mode: the 0xE2 it sent is a wake indicator with an
     /// empty name, so `battery` is meaningless.
     pub sleeping: bool,
@@ -79,6 +83,9 @@ pub fn parse_status(payload: &[u8]) -> Option<Status> {
     let charging = payload[3] != 0;
     let battery = payload[4];
     let polling = payload[6];
+    // Web driver: `e2 01 01 ...` 的 [5] 是当前 DPI 档位；[1] 为 00 表示 USB。
+    let wireless = Some(payload[1] != 0);
+    let dpi = (1..=6).contains(&payload[5]).then_some(payload[5]);
     let name: String = payload[9..17]
         .iter()
         .take_while(|b| **b != 0)
@@ -99,6 +106,8 @@ pub fn parse_status(payload: &[u8]) -> Option<Status> {
         charging,
         polling_hz: POLLING_HZ.get(polling as usize).copied(),
         name,
+        wireless,
+        dpi,
         sleeping,
     })
 }
@@ -229,7 +238,17 @@ mod tests {
         assert!(!st.charging);
         assert_eq!(st.polling_hz, Some(1000));
         assert_eq!(st.name, "A7 Pro");
+        assert_eq!(st.wireless, Some(true));
+        assert_eq!(st.dpi, Some(2));
         assert!(!st.sleeping);
+    }
+
+    #[test]
+    fn reports_wired_connection_mode() {
+        let mut p = e2_packet(50, false, 2, b"A7 Pro\0\0");
+        p[1] = 0x00;
+        let st = parse_status(&p).unwrap();
+        assert_eq!(st.wireless, Some(false));
     }
 
     #[test]

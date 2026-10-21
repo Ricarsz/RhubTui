@@ -41,6 +41,8 @@ pub fn read(hid: &HidInfo) -> Result<Status> {
             charging: false,
             polling_hz: None,
             name: String::new(),
+            wireless: None,
+            dpi: None,
             sleeping: false,
         });
     }

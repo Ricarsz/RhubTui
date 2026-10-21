@@ -416,6 +416,8 @@ fn read_batteries(selector: Option<&str>, json: bool) -> Result<()> {
                     "percent": status.battery,
                     "charging": status.charging,
                     "polling_hz": status.polling_hz,
+                    "dpi_level": status.dpi,
+                    "wireless": status.wireless,
                 })
             })
             .collect();
@@ -425,6 +427,12 @@ fn read_batteries(selector: Option<&str>, json: bool) -> Result<()> {
             let mut extra = Vec::new();
             if status.charging {
                 extra.push("charging".to_string());
+            }
+            if let Some(wireless) = status.wireless {
+                extra.push(if wireless { "2.4G" } else { "USB" }.to_string());
+            }
+            if let Some(dpi) = status.dpi {
+                extra.push(format!("DPI{dpi}"));
             }
             if let Some(hz) = status.polling_hz {
                 extra.push(format!("{hz}Hz"));
