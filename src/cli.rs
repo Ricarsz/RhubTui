@@ -2,16 +2,12 @@
 
 use std::path::Path;
 use std::process::Command;
-use std::time::{Duration, Instant};
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use serde_json::json;
 
-use crate::battery;
 use crate::config::Config;
-use crate::hidraw;
-use crate::model::{HidInfo, Peripheral};
 use crate::mount;
 use crate::ops;
 use crate::scan;
@@ -21,9 +17,9 @@ use crate::view;
 #[command(
     name = "rhubtui",
     version,
-    about = "2.4G 键鼠电量 + USB 外设管理",
-    long_about = "读取 MCHOSE 2.4G 接收器与标准 HID 通道的电量，列出 USB 外设与拓扑，\
-                  并通过 udisks2 挂载/卸载/弹出存储设备。无子命令时启动 TUI。"
+    about = "USB 设备查看与移动盘挂载",
+    long_about = "列出 USB 外设、拓扑与接口信息，并通过 udisks2 挂载、卸载、\
+                  安全弹出 U 盘与移动硬盘。无子命令时启动 TUI。"
 )]
 pub struct Cli {
     /// 以 JSON 输出
@@ -38,29 +34,13 @@ pub struct Cli {
 pub enum Cmd {
     /// 打印一次设备快照
     List,
-    /// 读取键鼠电量
-    Battery {
-        /// 设备选择：端口（7-1.4）、vid:pid（5253:1020）或 /dev/hidrawN
-        device: Option<String>,
-    },
     /// 挂载存储设备（默认第一个未挂载分区）
     Mount { device: Option<String> },
     /// 卸载存储设备（默认第一个已挂载分区）
     Umount { device: Option<String> },
     /// 安全弹出（默认第一个未挂载磁盘）
     Eject { device: Option<String> },
-    /// 抓取 HID 原始报文
-    Probe {
-        /// HID 节点，例如 /dev/hidraw2
-        node: String,
-        /// 抓取时长（秒）
-        #[arg(long, default_value_t = 10)]
-        seconds: u64,
-        /// 按 0xFF 异或解码 payload
-        #[arg(long)]
-        decode: bool,
-    },
-    /// 检查依赖、udev 规则与 hidraw 权限
+    /// 检查依赖与服务状态
     Doctor,
     /// 显示配置文件路径与当前值
     Config {
@@ -76,15 +56,9 @@ pub enum Cmd {
 pub fn run(cmd: Cmd, json: bool) -> Result<()> {
     match cmd {
         Cmd::List => list(json),
-        Cmd::Battery { device } => read_batteries(device.as_deref(), json),
         Cmd::Mount { device } => mount_device(device.as_deref(), json),
         Cmd::Umount { device } => umount_device(device.as_deref(), json),
         Cmd::Eject { device } => eject_device(device.as_deref(), json),
-        Cmd::Probe {
-            node,
-            seconds,
-            decode,
-        } => probe(&node, seconds, decode),
         Cmd::Doctor => doctor(json),
         Cmd::Config { init, force } => show_config(init, force, json),
     }
@@ -105,131 +79,6 @@ fn list(json: bool) -> Result<()> {
     }
     println!("{}", view::table::render(&view::table::rows(&snapshot)));
     Ok(())
-}
-
-// ─── battery ────────────────────────────────────────────────────────────────
-
-fn read_batteries(selector: Option<&str>, json: bool) -> Result<()> {
-    let snapshot = scan::scan();
-    let targets: Vec<(&Peripheral, &HidInfo)> = snapshot
-        .peripherals
-        .iter()
-        .flat_map(|peripheral| {
-            peripheral
-                .hids
-                .iter()
-                .filter(|hid| battery::supported(hid))
-                .map(move |hid| (peripheral, hid))
-        })
-        .filter(|(peripheral, hid)| match selector {
-            Some(selector) => matches_hid(peripheral, hid, selector),
-            None => true,
-        })
-        .collect();
-
-    if targets.is_empty() {
-        bail!("没有找到可读电量的设备（MCHOSE 接收器或标准 HID 电量通道）");
-    }
-
-    // 并行读取：休眠鼠标最坏要等 6 秒，不能让它拖住键盘。
-    let results: Vec<Result<crate::mchose::Status>> = std::thread::scope(|scope| {
-        let handles: Vec<_> = targets
-            .iter()
-            .map(|(_, hid)| {
-                let hid = (*hid).clone();
-                scope.spawn(move || battery::read(&hid))
-            })
-            .collect();
-        handles
-            .into_iter()
-            .map(|handle| {
-                handle
-                    .join()
-                    .unwrap_or_else(|_| Err(anyhow!("电量读取线程崩溃")))
-            })
-            .collect()
-    });
-
-    let mut readings = Vec::new();
-    for ((peripheral, hid), result) in targets.into_iter().zip(results) {
-        match result {
-            Ok(status) => readings.push((peripheral, hid, status)),
-            Err(error) => eprintln!("rhubtui: {} ({})：{error:#}", peripheral.name(), hid.node),
-        }
-    }
-
-    if json {
-        let values: Vec<_> = readings
-            .iter()
-            .map(|(peripheral, hid, status)| {
-                json!({
-                    "device": peripheral.name(),
-                    "sysfs": peripheral.usb.sysfs,
-                    "node": hid.node,
-                    "iface": hid.iface,
-                    "protocol": hid.protocol_name(),
-                    "percent": status.battery,
-                    "charging": status.charging,
-                    "polling_hz": status.polling_hz,
-                    "dpi_level": status.dpi,
-                    "wireless": status.wireless,
-                })
-            })
-            .collect();
-        println!("{}", serde_json::to_string_pretty(&values)?);
-    } else {
-        for (peripheral, hid, status) in &readings {
-            let mut extra = Vec::new();
-            if status.charging {
-                extra.push("charging".to_string());
-            }
-            if let Some(wireless) = status.wireless {
-                extra.push(if wireless { "2.4G" } else { "USB" }.to_string());
-            }
-            if let Some(dpi) = status.dpi {
-                extra.push(format!("DPI{dpi}"));
-            }
-            if let Some(hz) = status.polling_hz {
-                extra.push(format!("{hz}Hz"));
-            }
-            println!(
-                "{:<14} {:>3}%  {:<18} {}",
-                hid.node,
-                status.battery,
-                extra.join(" "),
-                crate::model::truncate_cols(&peripheral.name(), 40)
-            );
-        }
-    }
-
-    if readings.is_empty() {
-        bail!("所有设备都读取失败");
-    }
-    Ok(())
-}
-
-fn matches_hid(peripheral: &Peripheral, hid: &HidInfo, selector: &str) -> bool {
-    let selector = selector.trim().to_lowercase();
-    if selector == peripheral.usb.sysfs
-        || selector == peripheral.usb.id()
-        || normalize_id(&selector) == peripheral.usb.id()
-    {
-        return true;
-    }
-    let node = hid.node.trim_start_matches("/dev/").to_lowercase();
-    let selector = selector.trim_start_matches("/dev/");
-    selector == node || selector == hid.node.to_lowercase()
-}
-
-fn normalize_id(selector: &str) -> String {
-    let Some((vid, pid)) = selector.split_once(':') else {
-        return selector.to_string();
-    };
-    format!("{:04x}:{:04x}", parse_hex(vid), parse_hex(pid))
-}
-
-fn parse_hex(text: &str) -> u16 {
-    u16::from_str_radix(text.trim().trim_start_matches("0x"), 16).unwrap_or(0)
 }
 
 // ─── mount / umount / eject ─────────────────────────────────────────────────
@@ -301,39 +150,6 @@ fn eject_device(selector: Option<&str>, json: bool) -> Result<()> {
     Ok(())
 }
 
-// ─── probe ──────────────────────────────────────────────────────────────────
-
-fn probe(node: &str, seconds: u64, decode: bool) -> Result<()> {
-    let file = hidraw::open(node, false)?;
-    println!("监听 {node}，{seconds} 秒（Ctrl+C 结束）");
-
-    let start = Instant::now();
-    let deadline = start + Duration::from_secs(seconds);
-    let mut buffer = vec![0u8; 256];
-    while Instant::now() < deadline {
-        match hidraw::read_packet(&file, &mut buffer) {
-            Ok(Some(n)) if n > 0 => {
-                let raw = &buffer[..n];
-                let mut line =
-                    format!("{:>8} ms  id=0x{:02X}", start.elapsed().as_millis(), raw[0]);
-                for byte in raw {
-                    line.push_str(&format!(" {byte:02X}"));
-                }
-                if decode {
-                    line.push_str("  |");
-                    for byte in &raw[1..] {
-                        line.push_str(&format!(" {:02X}", byte ^ 0xFF));
-                    }
-                }
-                println!("{line}");
-            }
-            Ok(_) => std::thread::sleep(Duration::from_millis(10)),
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(())
-}
-
 // ─── doctor ─────────────────────────────────────────────────────────────────
 
 struct Check {
@@ -359,56 +175,7 @@ fn doctor(json: bool) -> Result<()> {
         required: false,
     });
 
-    let rule_paths = [
-        "/usr/lib/udev/rules.d/70-rhubtui.rules",
-        "/etc/udev/rules.d/70-rhubtui.rules",
-    ];
-    let rule = rule_paths.iter().find(|path| Path::new(path).exists());
-    checks.push(Check {
-        name: "udev 规则",
-        ok: rule.is_some(),
-        detail: rule
-            .map(|path| path.to_string())
-            .unwrap_or_else(|| "未安装".to_string()),
-        hint: Some("sudo install -m 0644 udev/70-rhubtui.rules /etc/udev/rules.d/"),
-        required: false,
-    });
-
     let snapshot = scan::scan();
-    let hid_targets: Vec<&HidInfo> = snapshot
-        .peripherals
-        .iter()
-        .flat_map(|peripheral| peripheral.hids.iter())
-        .filter(|hid| battery::supported(hid))
-        .collect();
-    if hid_targets.is_empty() {
-        checks.push(Check {
-            name: "hidraw 权限",
-            ok: true,
-            detail: "未连接 MCHOSE/HID 电量设备".to_string(),
-            hint: None,
-            required: false,
-        });
-    } else {
-        for hid in hid_targets {
-            let writable = hidraw::open(&hid.node, true).is_ok();
-            checks.push(Check {
-                name: "hidraw 权限",
-                ok: writable,
-                detail: format!(
-                    "{}（{} · {}）",
-                    hid.node,
-                    hid.protocol_name(),
-                    hid.iface
-                        .map(|iface| format!("iface {iface}"))
-                        .unwrap_or_else(|| "iface ?".into())
-                ),
-                hint: Some("安装 udev 规则后重新插拔接收器"),
-                required: false,
-            });
-        }
-    }
-
     let config = Config::load()?;
     checks.push(Check {
         name: "配置文件",
@@ -460,7 +227,6 @@ fn doctor(json: bool) -> Result<()> {
             serde_json::to_string_pretty(&json!({
                 "config": {
                     "scan_interval_ms": config.scan_interval_ms,
-                    "battery_refresh_secs": config.battery_refresh_secs,
                     "theme": config.theme,
                     "mouse": config.mouse,
                 },
@@ -468,7 +234,7 @@ fn doctor(json: bool) -> Result<()> {
             }))?
         );
     } else {
-        println!("依赖与权限");
+        println!("依赖与服务");
         for check in &checks {
             println!(
                 "{} {:<12} {}",
@@ -489,7 +255,7 @@ fn doctor(json: bool) -> Result<()> {
     }
     if checks.iter().any(|check| !check.ok) {
         println!();
-        println!("有权限/规则未就绪：设备枚举仍可用，电量/挂载会失败。");
+        println!("有依赖未就绪：设备枚举仍可用，挂载/弹出可能失败。");
     }
     Ok(())
 }
@@ -553,7 +319,6 @@ fn show_config(init: bool, force: bool, json: bool) -> Result<()> {
             serde_json::to_string_pretty(&json!({
                 "path": Config::path(),
                 "scan_interval_ms": config.scan_interval_ms,
-                "battery_refresh_secs": config.battery_refresh_secs,
                 "theme": config.theme,
                 "mouse": config.mouse,
                 "themes": crate::theme::Palette::NAMES,
@@ -562,7 +327,6 @@ fn show_config(init: bool, force: bool, json: bool) -> Result<()> {
     } else {
         println!("配置文件 {}", Config::path().display());
         println!("  scan_interval_ms     {}", config.scan_interval_ms);
-        println!("  battery_refresh_secs {}", config.battery_refresh_secs);
         println!(
             "  theme                {}（可选 {}）",
             config.theme,
@@ -593,7 +357,7 @@ mod tests {
             .find(|line| line.contains("A5 Pro Max"))
             .unwrap();
         assert!(mouse.contains("5253:1020"), "{mouse}");
-        assert!(mouse.contains("/dev/hidraw2 MCHOSE 鼠标"), "{mouse}");
+        assert!(mouse.contains("/dev/hidraw2"), "{mouse}");
         let dock = lines
             .iter()
             .find(|line| line.contains("USB4 Dock"))
@@ -626,7 +390,7 @@ mod tests {
         assert_eq!(mouse["category"], json!("input"));
         assert_eq!(mouse["name"], json!("A5 Pro Max"));
         assert_eq!(mouse["hids"][0]["node"], json!("/dev/hidraw2"));
-        assert_eq!(mouse["hids"][0]["protocol"], json!("MCHOSE 鼠标"));
+        assert_eq!(mouse["hids"][0]["pages"][0], json!("0xFF01"));
 
         let camera = view::json::peripheral(&snapshot.peripherals[3]);
         assert_eq!(camera["place"], json!("internal"));

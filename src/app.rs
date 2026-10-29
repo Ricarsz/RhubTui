@@ -1,5 +1,4 @@
-//! Application state: device list, selection, background battery reads and
-//! mount actions.
+//! Application state: device list, selection, background scans and mount actions.
 
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -19,10 +18,8 @@ mod input;
 mod threads;
 
 pub(crate) use self::threads::Msg;
-use self::threads::{snapshot_signature, spawn_battery_worker, spawn_scan_worker};
+use self::threads::{snapshot_signature, spawn_scan_worker};
 
-const RETRY_AFTER: Duration = Duration::from_secs(20);
-const LOADING_TIMEOUT: Duration = Duration::from_secs(15);
 const ACTION_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,15 +36,12 @@ pub struct App {
     pub details_area: ratatui::layout::Rect,
     pub list_offset: usize,
     pub selected_key: Option<String>,
-    pub batteries: HashMap<String, Battery>,
     pub part_sel: HashMap<String, usize>,
     pub status: String,
     pub status_error: bool,
     pub status_at: Instant,
     pub quitting: bool,
     pub show_help: bool,
-    /// 详情面板是否显示技术细节；默认关闭，按 `a` 切换。
-    pub advanced: bool,
     pub help_scroll: u16,
     pub detail_scroll: u16,
     pub detail_max: u16,
@@ -61,14 +55,10 @@ pub struct App {
     action_seq: u64,
     last_scan: Instant,
     scan_interval: Duration,
-    battery_refresh: Duration,
-    battery_at: HashMap<String, Instant>,
-    battery_tries: HashMap<String, u32>,
     snapshot_signature: Vec<String>,
     scan_busy: bool,
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
-    battery_tx: Sender<HidInfo>,
     scan_tx: Sender<()>,
     pub mouse: bool,
 }
@@ -76,11 +66,9 @@ pub struct App {
 impl App {
     pub fn new(config: Config) -> Self {
         let (tx, rx) = mpsc::channel();
-        let battery_tx = spawn_battery_worker(tx.clone());
         let scan_tx = spawn_scan_worker(tx.clone());
         let snapshot = scan::scan();
-        let mut app = Self::assemble(snapshot, config, tx, rx, battery_tx, scan_tx);
-        app.request_all_batteries();
+        let mut app = Self::assemble(snapshot, config, tx, rx, scan_tx);
         app.rebuild();
         app
     }
@@ -89,9 +77,8 @@ impl App {
     #[cfg(test)]
     pub fn for_test(snapshot: scan::Snapshot, config: Config) -> Self {
         let (tx, rx) = mpsc::channel();
-        let (battery_tx, _battery_rx) = mpsc::channel();
         let (scan_tx, _scan_rx) = mpsc::channel();
-        Self::assemble(snapshot, config, tx, rx, battery_tx, scan_tx)
+        Self::assemble(snapshot, config, tx, rx, scan_tx)
     }
 
     fn assemble(
@@ -99,11 +86,9 @@ impl App {
         config: Config,
         tx: Sender<Msg>,
         rx: Receiver<Msg>,
-        battery_tx: Sender<HidInfo>,
         scan_tx: Sender<()>,
     ) -> Self {
         let scan_interval = config.scan_interval();
-        let battery_refresh = config.battery_refresh();
         let mouse = config.mouse;
         let theme = config.theme.clone();
         let signature = snapshot_signature(&snapshot);
@@ -115,14 +100,12 @@ impl App {
             details_area: ratatui::layout::Rect::default(),
             list_offset: 0,
             selected_key: None,
-            batteries: HashMap::new(),
             part_sel: HashMap::new(),
             status: String::new(),
             status_error: false,
             status_at: Instant::now(),
             quitting: false,
             show_help: false,
-            advanced: false,
             help_scroll: 0,
             detail_scroll: 0,
             detail_max: 0,
@@ -136,14 +119,10 @@ impl App {
             action_seq: 0,
             last_scan: Instant::now(),
             scan_interval,
-            battery_refresh,
-            battery_at: HashMap::new(),
-            battery_tries: HashMap::new(),
             snapshot_signature: signature,
             scan_busy: false,
             tx,
             rx,
-            battery_tx,
             scan_tx,
             mouse,
         };
@@ -172,29 +151,9 @@ impl App {
             .count()
     }
 
-    pub fn low_battery(&self) -> Vec<(String, u8)> {
-        self.snap
-            .peripherals
-            .iter()
-            .filter(|peripheral| !peripheral.usb.place.is_internal())
-            .filter_map(|peripheral| {
-                let hid = peripheral.battery_hid()?;
-                let pct = self.battery_of(hid).pct()?;
-                (pct <= 20).then(|| (peripheral.name(), pct))
-            })
-            .collect()
-    }
-
     pub fn selected_peripheral(&self) -> Option<&Peripheral> {
         let index = self.rows.get(self.selected)?.device?;
         self.snap.peripherals.get(index)
-    }
-
-    pub fn battery_of(&self, hid: &HidInfo) -> Battery {
-        self.batteries
-            .get(&hid.node)
-            .cloned()
-            .unwrap_or(Battery::Unknown)
     }
 
     fn set_status(&mut self, text: impl Into<String>, error: bool) {
@@ -218,12 +177,7 @@ impl App {
     }
 
     pub fn busy(&self) -> bool {
-        self.scan_busy
-            || self.action_pending.is_some()
-            || self
-                .batteries
-                .values()
-                .any(|battery| matches!(battery, Battery::Loading))
+        self.scan_busy || self.action_pending.is_some()
     }
 
     // ─── list building ─────────────────────────────────────────────────────
@@ -252,8 +206,7 @@ impl App {
             rows.push(Row::section(category.title()));
             for index in indices {
                 let peripheral = &self.snap.peripherals[index];
-                let battery = peripheral.battery_hid().map(|hid| self.battery_of(hid));
-                rows.push(Row::device(index, peripheral, battery.as_ref()));
+                rows.push(Row::device(index, peripheral));
             }
         }
 
@@ -286,16 +239,9 @@ impl App {
 
     // ─── details pane ──────────────────────────────────────────────────────
 
-    /// 默认展示一眼能看懂的概览，按 `a` 切到技术细节。
     pub fn details(&self) -> view::Details {
         let index = self.rows.get(self.selected).and_then(|row| row.device);
-        view::details(
-            &self.snap,
-            index,
-            &self.batteries,
-            &self.part_sel,
-            self.advanced,
-        )
+        view::details(&self.snap, index)
     }
 }
 
@@ -343,18 +289,8 @@ pub fn run(config: Config) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::threads::retry_interval;
     use super::*;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-
-    #[test]
-    fn battery_retry_backs_off() {
-        assert_eq!(retry_interval(0), Duration::from_secs(20));
-        assert_eq!(retry_interval(1), Duration::from_secs(40));
-        assert_eq!(retry_interval(2), Duration::from_secs(80));
-        assert_eq!(retry_interval(3), Duration::from_secs(160));
-        assert_eq!(retry_interval(99), Duration::from_secs(160));
-    }
 
     fn fixture_app() -> App {
         App::for_test(crate::testing::snapshot(), Config::default())
@@ -408,7 +344,7 @@ mod tests {
     }
 
     #[test]
-    fn help_and_details_advanced_toggle() {
+    fn help_toggles_and_closes() {
         let mut app = fixture_app();
         app.on_key(key(KeyCode::Char('?')));
         assert!(app.show_help);
@@ -419,11 +355,7 @@ mod tests {
         assert!(!app.show_help);
         assert_eq!(app.help_scroll, 0);
 
-        assert!(!app.advanced);
-        app.on_key(key(KeyCode::Char('a')));
-        assert!(app.advanced);
-        app.on_key(key(KeyCode::Char('a')));
-        assert!(!app.advanced);
+        assert!(!app.show_help);
     }
 
     #[test]

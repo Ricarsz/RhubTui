@@ -21,7 +21,7 @@ pub mod usb;
 
 use self::audio::scan_audio;
 use self::hid::scan_hidraw;
-use self::misc::{scan_net, scan_printers, scan_tty, scan_video};
+use self::misc::scan_video;
 use self::storage::{lsblk_meta, read_mounts, scan_disks};
 use self::usb::scan_usb;
 
@@ -32,19 +32,13 @@ pub fn scan() -> Snapshot {
     let fsmeta = lsblk_meta();
     let disks = scan_disks(&mounts, &fsmeta);
     let audio = scan_audio();
-    let nets = scan_net();
     let videos = scan_video();
-    let ttys = scan_tty();
-    let printers = scan_printers();
 
     let mut peripherals = Vec::new();
     for usb in usbs {
         let hids = hid.get(&usb.sysfs).cloned().unwrap_or_default();
         let audio_info = audio.get(&usb.sysfs).cloned();
-        let nets_info = nets.get(&usb.sysfs).cloned().unwrap_or_default();
         let video_info = videos.get(&usb.sysfs).cloned().unwrap_or_default();
-        let tty_info = ttys.get(&usb.sysfs).cloned().unwrap_or_default();
-        let printer_info = printers.get(&usb.sysfs).cloned().unwrap_or_default();
 
         let mut dev_disks: Vec<Disk> = disks
             .iter()
@@ -67,7 +61,6 @@ pub fn scan() -> Snapshot {
             !dev_disks.is_empty(),
             !hids.is_empty(),
             audio_info.is_some(),
-            !nets_info.is_empty(),
             usb.is_hub(),
             &usb.ifaces
                 .iter()
@@ -79,10 +72,7 @@ pub fn scan() -> Snapshot {
             usb,
             hids,
             audio: audio_info,
-            nets: nets_info,
             videos: video_info,
-            ttys: tty_info,
-            printers: printer_info,
             disks: dev_disks,
             category,
         });
@@ -100,14 +90,11 @@ fn classify(
     has_disk: bool,
     has_hid: bool,
     has_audio: bool,
-    has_net: bool,
     is_hub: bool,
     classes: &[u8],
 ) -> Category {
     if has_disk || classes.contains(&0x08) {
         Category::Storage
-    } else if has_net {
-        Category::Network
     } else if has_audio {
         Category::Audio
     } else if has_hid {
@@ -186,20 +173,17 @@ mod tests {
     #[test]
     fn categorises_multifunction_devices() {
         assert_eq!(
-            classify(true, true, true, true, true, &[0x01, 0x08]),
+            classify(true, true, true, true, &[0x01, 0x08]),
             Category::Storage
         );
         assert_eq!(
-            classify(false, true, false, false, false, &[0x03]),
+            classify(false, true, false, false, &[0x03]),
             Category::Input
         );
         assert_eq!(
-            classify(false, false, false, true, false, &[0x0A]),
-            Category::Network
+            classify(false, false, true, false, &[0x0A]),
+            Category::Audio
         );
-        assert_eq!(
-            classify(false, false, false, false, true, &[0x09]),
-            Category::Hub
-        );
+        assert_eq!(classify(false, false, false, true, &[0x09]), Category::Hub);
     }
 }

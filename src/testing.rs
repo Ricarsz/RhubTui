@@ -1,10 +1,8 @@
 //! 测试夹具：构造一份稳定、不依赖真实硬件的快照。
 
-use std::collections::HashMap;
-
 use crate::model::{
-    AudioCard, Battery, Category, Controller, Disk, HidInfo, HubKind, Iface, MountPoint, NetIf,
-    Partition, Peripheral, Placement, UsbDev,
+    AudioCard, Category, Controller, Disk, HidInfo, HubKind, Iface, MountPoint, Partition,
+    Peripheral, Placement, UsbDev,
 };
 use crate::scan::Snapshot;
 
@@ -21,10 +19,6 @@ fn usb(sysfs: &str, bus: u8, port: u8, vid: u16, pid: u16, product: &str) -> Usb
         serial: "0000000000".into(),
         speed: "480".into(),
         class: 0x00,
-        subclass: 0x00,
-        protocol: 0x00,
-        num_interfaces: 1,
-        num_configs: 1,
         power_ma: Some(500),
         maxchild: 0,
         ltm_capable: false,
@@ -81,18 +75,9 @@ pub fn snapshot() -> Snapshot {
             node: "/dev/hidraw2".into(),
             iface: Some(1),
             pages: vec![0xFF01],
-            mchose: true,
-            cmd_out: 5,
-            data_out: 5,
-            in_len: 16,
-            battery_feature: None,
-            keyboard: false,
         }],
         audio: None,
-        nets: Vec::new(),
         videos: Vec::new(),
-        ttys: Vec::new(),
-        printers: Vec::new(),
         disks: Vec::new(),
         category: Category::Input,
     };
@@ -110,7 +95,6 @@ pub fn snapshot() -> Snapshot {
         usb: UsbDev {
             product: "PSSD T7".into(),
             manufacturer: "Example".into(),
-            num_interfaces: 2,
             ifaces: vec![
                 Iface {
                     number: 0,
@@ -133,10 +117,7 @@ pub fn snapshot() -> Snapshot {
         },
         hids: Vec::new(),
         audio: None,
-        nets: Vec::new(),
         videos: Vec::new(),
-        ttys: Vec::new(),
-        printers: Vec::new(),
         disks: vec![Disk {
             name: "sda".into(),
             path: "/dev/sda".into(),
@@ -176,16 +157,7 @@ pub fn snapshot() -> Snapshot {
             name: "USB4 Dock Audio".into(),
             pcms: vec!["usbstream".into()],
         }),
-        nets: vec![NetIf {
-            name: "enp0s20f0u1".into(),
-            mac: "02:00:00:00:00:01".into(),
-            speed_mbps: Some(1000),
-            state: "up".into(),
-            driver: "r8152".into(),
-        }],
         videos: Vec::new(),
-        ttys: Vec::new(),
-        printers: Vec::new(),
         disks: Vec::new(),
         category: Category::Hub,
     };
@@ -204,10 +176,7 @@ pub fn snapshot() -> Snapshot {
         },
         hids: Vec::new(),
         audio: None,
-        nets: Vec::new(),
         videos: vec!["Integrated Camera".into()],
-        ttys: Vec::new(),
-        printers: Vec::new(),
         disks: Vec::new(),
         category: Category::Other,
     };
@@ -215,18 +184,4 @@ pub fn snapshot() -> Snapshot {
     Snapshot {
         peripherals: vec![storage, mouse, dock, camera],
     }
-}
-
-/// 与快照配套的电量状态，节点对应鼠标的 hidraw。
-pub fn batteries() -> HashMap<String, Battery> {
-    HashMap::from([(
-        "/dev/hidraw2".to_string(),
-        Battery::Ok {
-            pct: 73,
-            charging: false,
-            hz: Some(1000),
-            dpi: Some(2),
-            wireless: Some(true),
-        },
-    )])
 }

@@ -28,7 +28,6 @@ impl App {
         self.selected_key = key;
         self.detail_scroll = 0;
         self.dirty = true;
-        self.request_battery();
     }
 
     pub(crate) fn select(&mut self, index: usize) {
@@ -354,17 +353,6 @@ impl App {
             KeyCode::Char('J') => self.scroll_details(1),
             KeyCode::Char('K') => self.scroll_details(-1),
             KeyCode::Char('/') => self.begin_filter(),
-            KeyCode::Char('b') => self.refresh_batteries(),
-            KeyCode::Char('a') => {
-                self.advanced = !self.advanced;
-                self.detail_scroll = 0;
-                let text = if self.advanced {
-                    "详情：高级信息"
-                } else {
-                    "详情：概览"
-                };
-                self.set_status(text, false);
-            }
             KeyCode::Char('r') => {
                 self.request_scan();
                 self.set_status("正在刷新设备…", false);
@@ -453,14 +441,5 @@ impl App {
         self.rebuild();
         self.dirty = true;
         self.set_status(format!("主题：{}", self.theme), false);
-    }
-
-    pub(crate) fn refresh_batteries(&mut self) {
-        self.batteries.clear();
-        self.battery_at.clear();
-        self.battery_tries.clear();
-        self.request_all_batteries();
-        self.rebuild();
-        self.set_status("重新读取电量", false);
     }
 }

@@ -8,7 +8,6 @@
 | 路径 | 说明 |
 |---|---|
 | `/usr/bin/rhubtui` | 可执行文件 |
-| `/usr/lib/udev/rules.d/70-rhubtui.rules` | MCHOSE 接收器的 `hidraw` 权限 |
 | `/usr/share/doc/rhubtui/` | README 与 docs |
 
 依赖：`udisks2`（挂载/弹出）、`util-linux`（`lsblk`）。
@@ -46,17 +45,6 @@ make              # cargo build --release
 sudo make install # /usr/local/bin/rhubtui
 ```
 
-手动安装时 udev 规则需要自己放：
-
-```bash
-sudo install -Dm644 udev/70-rhubtui.rules \
-  /usr/lib/udev/rules.d/70-rhubtui.rules
-sudo udevadm control --reload
-sudo udevadm trigger --subsystem-match=hidraw
-```
-
-重新插拔 2.4G 接收器后，电量读取才有权限。
-
 ## 配置（可选）
 
 ```bash
@@ -68,8 +56,6 @@ rhubtui config                 # 查看路径和当前值
 
 ## 权限
 
-- **电量**：需要 `/dev/hidraw*` 读写权限，由 udev 规则给当前登录会话打 `uaccess`。
-  没有规则时 `doctor` 会报 `hidraw 权限 ❌`，TUI 详情也会提示。
 - **挂载**：走 udisks2 的 D-Bus 接口，普通 U 盘在活动本地会话里免密；
   个别 USB 硬盘盒会被判成不可移动设备，需要 polkit 授权。
 

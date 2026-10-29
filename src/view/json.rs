@@ -87,13 +87,6 @@ pub fn peripheral(peripheral: &Peripheral) -> serde_json::Value {
             "node": hid.node,
             "iface": hid.iface,
             "pages": hid.pages.iter().map(|p| format!("0x{p:04X}")).collect::<Vec<_>>(),
-            "protocol": hid.protocol_name(),
-            "battery_supported": hid.has_battery(),
-            "reports": {
-                "cmd": hid.cmd_out,
-                "data": hid.data_out,
-                "in": hid.in_len,
-            },
         })).collect::<Vec<_>>(),
         "disks": disks,
         "audio": peripheral.audio.as_ref().map(|audio| json!({
@@ -103,16 +96,7 @@ pub fn peripheral(peripheral: &Peripheral) -> serde_json::Value {
             "name": audio.name,
             "pcms": audio.pcms,
         })),
-        "nets": peripheral.nets.iter().map(|net| json!({
-            "name": net.name,
-            "mac": net.mac,
-            "speed_mbps": net.speed_mbps,
-            "state": net.state,
-            "driver": net.driver,
-        })).collect::<Vec<_>>(),
         "videos": peripheral.videos,
-        "ttys": peripheral.ttys,
-        "printers": peripheral.printers,
     })
 }
 
@@ -131,7 +115,6 @@ pub(crate) fn category_tag(category: Category) -> &'static str {
         Category::Storage => "storage",
         Category::Input => "input",
         Category::Audio => "audio",
-        Category::Network => "network",
         Category::Hub => "hub",
         Category::Other => "other",
     }

@@ -24,36 +24,11 @@ pub(crate) fn scan_hidraw() -> HashMap<String, Vec<HidInfo>> {
         let desc = fs::read(real.join("report_descriptor"))
             .map(|bytes| ReportDescriptor::parse(&bytes))
             .unwrap_or_default();
-        let mchose =
-            desc.has_page(0xFF01) && desc.report(0x11).is_some() && desc.report(0x13).is_some();
-        let keyboard = desc.has_page(0xFF31)
-            && desc
-                .report(0)
-                .map(|r| r.input_bytes >= 41 && r.output_bytes >= 64)
-                .unwrap_or(false);
 
         let info = HidInfo {
             node,
             iface: iface_of(&real),
             pages: desc.usage_pages.iter().copied().collect(),
-            mchose,
-            cmd_out: desc
-                .report(0x11)
-                .filter(|report| report.output_bytes > 0)
-                .map(|report| report.output_bytes)
-                .unwrap_or(20),
-            data_out: desc
-                .report(0x12)
-                .filter(|report| report.output_bytes > 0)
-                .map(|report| report.output_bytes)
-                .unwrap_or(64),
-            in_len: desc
-                .report(0x13)
-                .map(|report| report.input_bytes)
-                .unwrap_or(20)
-                .max(17),
-            battery_feature: desc.battery_feature_report(),
-            keyboard,
         };
 
         let list = out.entry(usb).or_default();
@@ -63,23 +38,9 @@ pub(crate) fn scan_hidraw() -> HashMap<String, Vec<HidInfo>> {
         }
     }
 
-    // 协议优先级：MCHOSE 鼠标 > MCHOSE 键盘 > 标准电量 > 厂商页 > 普通 HID。
+    // 只影响展示顺序：按接口号排列，缺少接口号的排最后。
     for list in out.values_mut() {
-        list.sort_by_key(|info| (std::cmp::Reverse(score(info)), info.iface.unwrap_or(0)));
+        list.sort_by_key(|info| (info.iface.is_none(), info.iface.unwrap_or(0)));
     }
     out
-}
-
-fn score(info: &HidInfo) -> u8 {
-    if info.mchose {
-        4
-    } else if info.keyboard {
-        3
-    } else if info.battery_feature.is_some() {
-        2
-    } else if info.pages.iter().any(|page| *page >= 0xFF00) {
-        1
-    } else {
-        0
-    }
 }

@@ -1,8 +1,8 @@
 # Maintainer: RhubTui contributors
 pkgname=rhubtui
-pkgver=0.4.1
+pkgver=0.5.0
 pkgrel=1
-pkgdesc="2.4G keyboard/mouse battery, USB peripheral dashboard and mount manager"
+pkgdesc="USB device viewer and removable drive mounter for the terminal"
 arch=('x86_64' 'aarch64')
 url="https://github.com/Ricarsz/RhubTui"
 license=('MIT')
@@ -35,8 +35,6 @@ package() {
   install -Dm755 target/release/rhubtui "$pkgdir/usr/bin/rhubtui"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
-  install -Dm644 udev/70-rhubtui.rules \
-    "$pkgdir/usr/lib/udev/rules.d/70-rhubtui.rules"
   install -d "$pkgdir/usr/share/doc/$pkgname/docs"
   install -m644 docs/*.md "$pkgdir/usr/share/doc/$pkgname/docs/"
 }

@@ -7,17 +7,15 @@ pub enum Category {
     Storage,
     Input,
     Audio,
-    Network,
     Hub,
     Other,
 }
 
 impl Category {
-    pub const ALL: [Category; 6] = [
+    pub const ALL: [Category; 5] = [
         Category::Storage,
         Category::Input,
         Category::Audio,
-        Category::Network,
         Category::Hub,
         Category::Other,
     ];
@@ -27,7 +25,6 @@ impl Category {
             Category::Storage => "存储",
             Category::Input => "键鼠 / HID",
             Category::Audio => "音频",
-            Category::Network => "网络",
             Category::Hub => "扩展坞 / Hub",
             Category::Other => "其他",
         }
@@ -84,21 +81,6 @@ pub struct Controller {
     pub buses: Vec<u8>,
 }
 
-impl Controller {
-    pub fn label(&self) -> String {
-        let mut text = self.slot.clone();
-        if !self.driver.is_empty() {
-            text.push_str(&format!(" · {}", self.driver));
-        }
-        text.push_str(&format!(" · {:04x}:{:04x}", self.vendor, self.device));
-        if self.buses.len() > 1 {
-            let buses: Vec<String> = self.buses.iter().map(u8::to_string).collect();
-            text.push_str(&format!(" · 根总线 {}", buses.join("/")));
-        }
-        text
-    }
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct Iface {
     pub number: u8,
@@ -136,33 +118,6 @@ impl Iface {
     }
 }
 
-fn class_name(class: u8) -> &'static str {
-    match class {
-        0x01 => "audio",
-        0x02 => "cdc",
-        0x03 => "hid",
-        0x06 => "image",
-        0x07 => "printer",
-        0x08 => "storage",
-        0x09 => "hub",
-        0x0A => "cdc-data",
-        0x0B => "smartcard",
-        0x0D => "content-security",
-        0x0E => "video",
-        0x0F => "healthcare",
-        0x10 => "av",
-        0x11 => "billboard",
-        0x12 => "bridge",
-        0x13 => "smartcard",
-        0xDC => "diagnostic",
-        0xE0 => "wireless",
-        0xEF => "misc",
-        0xFE => "app-specific",
-        0xFF => "vendor",
-        _ => "?",
-    }
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct UsbDev {
     pub sysfs: String,
@@ -176,10 +131,6 @@ pub struct UsbDev {
     pub serial: String,
     pub speed: String,
     pub class: u8,
-    pub subclass: u8,
-    pub protocol: u8,
-    pub num_interfaces: u8,
-    pub num_configs: u8,
     pub power_ma: Option<u32>,
     pub maxchild: u8,
     pub ltm_capable: bool,
@@ -245,14 +196,6 @@ impl UsbDev {
     /// 该设备是否接在扩展坞上。
     pub fn on_dock(&self) -> bool {
         self.dock.is_some()
-    }
-
-    pub fn class_name(&self, class: u8) -> &'static str {
-        match class {
-            0x00 => "由接口定义",
-            0x09 => "hub",
-            _ => class_name(class),
-        }
     }
 
     /// 连接位置的一句话描述：主板根端口 / Hub 的 N 号口 / 扩展坞的 N 号口。
@@ -331,36 +274,6 @@ pub struct HidInfo {
     /// 所在 USB 接口号（`bInterfaceNumber`）。
     pub iface: Option<u8>,
     pub pages: Vec<u16>,
-    pub mchose: bool,
-    pub cmd_out: usize,
-    pub data_out: usize,
-    pub in_len: usize,
-    pub battery_feature: Option<(u8, usize)>,
-    /// MCHOSE keyboard config channel (usage page 0xFF31).
-    pub keyboard: bool,
-}
-
-impl HidInfo {
-    pub fn protocol_name(&self) -> &'static str {
-        if self.mchose {
-            "MCHOSE 鼠标"
-        } else if self.keyboard {
-            "MCHOSE 键盘"
-        } else if self.battery_feature.is_some() {
-            "HID 标准电量"
-        } else {
-            "无电量协议"
-        }
-    }
-
-    pub fn has_battery(&self) -> bool {
-        self.mchose || self.keyboard || self.battery_feature.is_some()
-    }
-
-    /// 已确认的 2.4G 接收器通道：厂商协议本身只在无线链路上出现。
-    pub fn wireless(&self) -> bool {
-        self.mchose || self.keyboard
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -384,16 +297,6 @@ impl MountPoint {
                 .saturating_mul(100)
                 .div_ceil(total) as u8,
         )
-    }
-
-    pub fn usage_label(&self) -> Option<String> {
-        let (total, free) = (self.total?, self.free?);
-        Some(format!(
-            "{} / {}（{}%）",
-            human_size(total.saturating_sub(free)),
-            human_size(total),
-            self.used_pct().unwrap_or(0)
-        ))
     }
 }
 
@@ -449,106 +352,14 @@ pub struct AudioCard {
     pub pcms: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct NetIf {
-    pub name: String,
-    pub mac: String,
-    pub speed_mbps: Option<u64>,
-    pub state: String,
-    pub driver: String,
-}
-
-impl NetIf {
-    pub fn label(&self) -> String {
-        let mut text = self.name.clone();
-        if let Some(speed) = self.speed_mbps {
-            text.push_str(&format!(" · {speed} Mb/s"));
-        }
-        if !self.state.is_empty() {
-            text.push_str(&format!(" · {}", self.state));
-        }
-        if !self.mac.is_empty() {
-            text.push_str(&format!(" · {}", self.mac));
-        }
-        text
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Battery {
-    Unknown,
-    Loading,
-    Ok {
-        pct: u8,
-        charging: bool,
-        hz: Option<u32>,
-        /// MCHOSE 鼠标 `0xE2` 状态包里的当前 DPI 档位。
-        dpi: Option<u8>,
-        /// `Some(true)` 为 2.4G，`Some(false)` 为 USB 有线，`None` 未上报。
-        wireless: Option<bool>,
-    },
-    Err(String),
-}
-
-impl Battery {
-    pub fn label(&self) -> String {
-        match self {
-            Battery::Ok { pct, charging, .. } => {
-                if *charging {
-                    format!("{pct}%+")
-                } else {
-                    format!("{pct}%")
-                }
-            }
-            Battery::Loading => "…".into(),
-            _ => String::new(),
-        }
-    }
-
-    pub fn pct(&self) -> Option<u8> {
-        match self {
-            Battery::Ok { pct, .. } => Some(*pct),
-            _ => None,
-        }
-    }
-
-    /// 读到的回报率；键盘等没有该字段的协议返回 `None`。
-    pub fn hz(&self) -> Option<u32> {
-        match self {
-            Battery::Ok { hz, .. } => *hz,
-            _ => None,
-        }
-    }
-
-    /// 当前 DPI 档位；非 MCHOSE 鼠标返回 `None`。
-    pub fn dpi(&self) -> Option<u8> {
-        match self {
-            Battery::Ok { dpi, .. } => *dpi,
-            _ => None,
-        }
-    }
-
-    /// `0xE2` 上报的连接方式：`Some(true)` 2.4G，`Some(false)` USB 有线。
-    pub fn wireless(&self) -> Option<bool> {
-        match self {
-            Battery::Ok { wireless, .. } => *wireless,
-            _ => None,
-        }
-    }
-}
-
 /// 一个 USB 设备以及挂在它上面的所有功能节点。
 #[derive(Clone)]
 pub struct Peripheral {
     pub usb: UsbDev,
-    /// 同一接收器可能暴露多个 HID 接口（键鼠组合、厂商页 + 电量页），
-    /// 按协议优先级从高到低排列。
+    /// 同一接收器可能暴露多个 HID 接口（键鼠组合、厂商页），按接口号排列。
     pub hids: Vec<HidInfo>,
     pub audio: Option<AudioCard>,
-    pub nets: Vec<NetIf>,
     pub videos: Vec<String>,
-    pub ttys: Vec<String>,
-    pub printers: Vec<String>,
     pub disks: Vec<Disk>,
     pub category: Category,
 }
@@ -562,12 +373,6 @@ impl Peripheral {
         self.usb.name()
     }
 
-    /// 协议优先级最高的 HID 接口（列表徽标、详情首屏用）。
-    /// 第一个带有电量后端的 HID 接口。
-    pub fn battery_hid(&self) -> Option<&HidInfo> {
-        self.hids.iter().find(|hid| hid.has_battery())
-    }
-
     /// 面向用户的设备类型：优先按 HID 用途细分键鼠，拿不到时退回大类。
     pub fn kind_label(&self) -> &'static str {
         let has_iface = |subclass: u8, protocol: u8| {
@@ -575,21 +380,13 @@ impl Peripheral {
                 iface.class == 0x03 && iface.subclass == subclass && iface.protocol == protocol
             })
         };
-        if self.hids.iter().any(|hid| hid.keyboard) || has_iface(0x01, 0x01) {
+        if has_iface(0x01, 0x01) {
             "键盘"
-        } else if self.hids.iter().any(|hid| hid.mchose) || has_iface(0x01, 0x02) {
+        } else if has_iface(0x01, 0x02) {
             "鼠标"
         } else {
             self.category.title()
         }
-    }
-
-    /// 已确认的无线连接方式；非 MCHOSE 接收器不做猜测。
-    pub fn connection(&self) -> Option<&'static str> {
-        self.hids
-            .iter()
-            .any(HidInfo::wireless)
-            .then_some("2.4G 无线")
     }
 
     /// 所有功能节点的一行摘要，用于列表徽标。
@@ -604,17 +401,8 @@ impl Peripheral {
         if self.audio.is_some() {
             out.push("音频");
         }
-        if !self.nets.is_empty() {
-            out.push("网卡");
-        }
         if !self.videos.is_empty() {
             out.push("摄像头");
-        }
-        if !self.ttys.is_empty() {
-            out.push("串口");
-        }
-        if !self.printers.is_empty() {
-            out.push("打印");
         }
         out
     }
@@ -684,38 +472,6 @@ pub fn human_size(bytes: u64) -> String {
     }
 }
 
-pub fn speed_label(speed: &str) -> String {
-    match speed {
-        "1.5" => "Low-Speed (1.5 Mbps)".into(),
-        "12" => "Full-Speed (12 Mbps)".into(),
-        "480" => "High-Speed (480 Mbps)".into(),
-        "5000" => "SuperSpeed (5 Gbps)".into(),
-        "10000" => "SuperSpeed+ (10 Gbps)".into(),
-        "20000" => "SuperSpeed+ (20 Gbps)".into(),
-        other => format!("{other} Mbps"),
-    }
-}
-
-/// 电量条，例如 `████████░░ 82%`。
-pub fn battery_bar(pct: u8, width: usize) -> String {
-    let pct = pct.min(100);
-    let filled = (width * pct as usize).div_ceil(100).min(width);
-    let mut text = "█".repeat(filled);
-    text.push_str(&"░".repeat(width - filled));
-    text.push_str(&format!(" {pct:>3}%"));
-    text
-}
-
-/// 空间占用条，例如 `███░░░░░ 38%`。
-pub fn usage_bar(pct: u8, width: usize) -> String {
-    let pct = pct.min(100);
-    let filled = (width * pct as usize).div_ceil(100).min(width);
-    let mut text = "█".repeat(filled);
-    text.push_str(&"░".repeat(width - filled));
-    text.push_str(&format!(" {pct:>3}%"));
-    text
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -735,34 +491,6 @@ mod tests {
     }
 
     #[test]
-    fn speeds_are_labelled() {
-        assert!(speed_label("480").contains("High-Speed"));
-        assert!(speed_label("999").contains("999"));
-    }
-
-    #[test]
-    fn battery_label_marks_charging() {
-        let b = Battery::Ok {
-            pct: 88,
-            charging: true,
-            hz: Some(1000),
-            dpi: Some(2),
-            wireless: Some(true),
-        };
-        assert_eq!(b.label(), "88%+");
-        assert_eq!(b.pct(), Some(88));
-        assert_eq!(b.dpi(), Some(2));
-        assert_eq!(b.wireless(), Some(true));
-    }
-
-    #[test]
-    fn battery_bar_has_requested_width() {
-        assert_eq!(battery_bar(50, 10), "█████░░░░░  50%");
-        assert_eq!(battery_bar(0, 4), "░░░░   0%");
-        assert!(battery_bar(120, 4).ends_with("100%"));
-    }
-
-    #[test]
     fn usage_percent_rounds_up() {
         let mount = MountPoint {
             path: "/run/media/u/disk".into(),
@@ -771,7 +499,6 @@ mod tests {
             free: Some(620),
         };
         assert_eq!(mount.used_pct(), Some(38));
-        assert!(mount.usage_label().unwrap().contains("38%"));
     }
 
     #[test]
@@ -793,17 +520,11 @@ mod tests {
         assert_eq!(dev.link_label(), "根端口 2");
     }
 
-    fn hid(keyboard: bool, mchose: bool) -> HidInfo {
+    fn hid() -> HidInfo {
         HidInfo {
             node: "/dev/hidraw0".into(),
             iface: None,
             pages: Vec::new(),
-            mchose,
-            cmd_out: 20,
-            data_out: 64,
-            in_len: 20,
-            battery_feature: None,
-            keyboard,
         }
     }
 
@@ -815,10 +536,7 @@ mod tests {
             },
             hids,
             audio: None,
-            nets: Vec::new(),
             videos: Vec::new(),
-            ttys: Vec::new(),
-            printers: Vec::new(),
             disks: Vec::new(),
             category: Category::Input,
         }
@@ -850,13 +568,31 @@ mod tests {
 
     #[test]
     fn overview_labels_keyboard_and_mouse() {
-        let keyboard = input(vec![hid(true, false)], Vec::new());
+        let keyboard = input(
+            vec![hid()],
+            vec![Iface {
+                number: 0,
+                class: 0x03,
+                subclass: 0x01,
+                protocol: 0x01,
+                endpoints: 1,
+                driver: String::new(),
+            }],
+        );
         assert_eq!(keyboard.kind_label(), "键盘");
-        assert_eq!(keyboard.connection(), Some("2.4G 无线"));
 
-        let mouse = input(vec![hid(false, true)], Vec::new());
+        let mouse = input(
+            vec![hid()],
+            vec![Iface {
+                number: 0,
+                class: 0x03,
+                subclass: 0x01,
+                protocol: 0x02,
+                endpoints: 1,
+                driver: String::new(),
+            }],
+        );
         assert_eq!(mouse.kind_label(), "鼠标");
-        assert_eq!(mouse.connection(), Some("2.4G 无线"));
     }
 
     #[test]
@@ -871,6 +607,5 @@ mod tests {
         }];
         let mouse = input(Vec::new(), ifaces);
         assert_eq!(mouse.kind_label(), "鼠标");
-        assert_eq!(mouse.connection(), None);
     }
 }

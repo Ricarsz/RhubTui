@@ -5,3 +5,6 @@ packaging/aur/src/
 packaging/aur/pkg/
 packaging/aur/*.pkg.tar.zst
 packaging/aur/*.tar.gz
+
+# 本地打包产物
+/dist

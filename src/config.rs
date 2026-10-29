@@ -13,8 +13,6 @@ use serde::{Deserialize, Serialize};
 pub struct Config {
     /// 设备扫描间隔（毫秒），最小 200。
     pub scan_interval_ms: u64,
-    /// 电量自动刷新间隔（秒），最小 10。
-    pub battery_refresh_secs: u64,
     /// 配色：ocean | forest | sunset。
     pub theme: String,
     /// 是否启用鼠标（滚轮滚动、点击选择）。
@@ -25,7 +23,6 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             scan_interval_ms: 1000,
-            battery_refresh_secs: 120,
             theme: "ocean".to_string(),
             mouse: true,
         }
@@ -69,10 +66,6 @@ impl Config {
     pub fn scan_interval(&self) -> Duration {
         Duration::from_millis(self.scan_interval_ms.max(200))
     }
-
-    pub fn battery_refresh(&self) -> Duration {
-        Duration::from_secs(self.battery_refresh_secs.max(10))
-    }
 }
 
 #[cfg(test)]
@@ -83,16 +76,13 @@ mod tests {
     fn defaults_are_sane() {
         let config = Config::default();
         assert_eq!(config.scan_interval(), Duration::from_millis(1000));
-        assert_eq!(config.battery_refresh(), Duration::from_secs(120));
         assert_eq!(config.theme, "ocean");
         assert!(config.mouse);
     }
 
     #[test]
     fn clamps_to_safe_minimums() {
-        let config: Config =
-            toml::from_str("scan_interval_ms = 0\nbattery_refresh_secs = 0").unwrap();
+        let config: Config = toml::from_str("scan_interval_ms = 0").unwrap();
         assert_eq!(config.scan_interval(), Duration::from_millis(200));
-        assert_eq!(config.battery_refresh(), Duration::from_secs(10));
     }
 }

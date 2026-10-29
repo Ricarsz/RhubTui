@@ -2,7 +2,7 @@
 
 use unicode_width::UnicodeWidthStr;
 
-use crate::model::{HidInfo, Peripheral};
+use crate::model::Peripheral;
 use crate::scan::Snapshot;
 
 pub fn rows(snapshot: &Snapshot) -> Vec<Vec<String>> {
@@ -74,16 +74,8 @@ fn place_tag(peripheral: &Peripheral) -> String {
 
 fn extra_summary(peripheral: &Peripheral) -> String {
     let mut extra = Vec::new();
-    let supported: Vec<&HidInfo> = peripheral
-        .hids
-        .iter()
-        .filter(|hid| hid.has_battery())
-        .collect();
-    for hid in &supported {
-        extra.push(format!("{} {}", hid.node, hid.protocol_name()));
-    }
-    if peripheral.hids.len() > supported.len() {
-        extra.push(format!("共 {} 个 HID 接口", peripheral.hids.len()));
+    for hid in &peripheral.hids {
+        extra.push(hid.node.clone());
     }
     for disk in &peripheral.disks {
         for partition in &disk.partitions {
@@ -103,17 +95,8 @@ fn extra_summary(peripheral: &Peripheral) -> String {
     if let Some(audio) = &peripheral.audio {
         extra.push(format!("card {} {}", audio.index, audio.id));
     }
-    for net in &peripheral.nets {
-        extra.push(net.label());
-    }
     if !peripheral.videos.is_empty() {
         extra.push(peripheral.videos.join(" "));
-    }
-    if !peripheral.ttys.is_empty() {
-        extra.push(peripheral.ttys.join(" "));
-    }
-    if !peripheral.printers.is_empty() {
-        extra.push(peripheral.printers.join(" "));
     }
     if peripheral.usb.is_hub() {
         extra.push(format!(
