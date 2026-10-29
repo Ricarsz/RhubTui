@@ -13,6 +13,7 @@ mod mchose;
 mod model;
 mod mount;
 mod ops;
+mod probe;
 mod scan;
 #[cfg(test)]
 mod testing;
