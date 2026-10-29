@@ -13,8 +13,11 @@ mod mchose;
 mod model;
 mod mount;
 mod scan;
+#[cfg(test)]
+mod testing;
 mod theme;
 mod ui;
+mod view;
 
 use std::process::ExitCode;
 

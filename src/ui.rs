@@ -2,7 +2,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, BorderType, Clear, List, ListItem, ListState, Paragraph, Scrollbar,
@@ -12,6 +12,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Confirm};
 use crate::theme::Palette;
+use crate::view::{Details, Row, RowText, Tone};
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let palette = app.palette();
@@ -94,11 +95,11 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect, palette: Palette) {
 
 fn draw_list(frame: &mut Frame, app: &mut App, area: Rect, palette: Palette) {
     // 边框、高亮符号和徽标大约占 16 列，其余留给设备名。
-    app.set_name_width(area.width.saturating_sub(16) as usize);
+    let name_cols = area.width.saturating_sub(16) as usize;
     let items: Vec<ListItem> = app
         .rows
         .iter()
-        .map(|row| ListItem::new(row.line.clone()))
+        .map(|row| ListItem::new(row_line(row, name_cols, palette)))
         .collect();
 
     let title = if app.filter_editing {
@@ -132,6 +133,50 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect, palette: Palette) {
     app.list_offset = state.offset();
 }
 
+fn tone_color(tone: Tone, palette: Palette) -> Color {
+    match tone {
+        Tone::Normal => palette.text,
+        Tone::Accent => palette.accent,
+        Tone::Good => palette.good,
+        Tone::Warn => palette.warn,
+        Tone::Bad => palette.bad,
+        Tone::Dim => palette.dim,
+        Tone::Faint => palette.faint,
+    }
+}
+
+fn row_line(row: &Row, name_cols: usize, palette: Palette) -> Line<'static> {
+    match &row.text {
+        RowText::Section(title) => Line::from(Span::styled(
+            format!(" {title} "),
+            Style::default()
+                .fg(palette.surface)
+                .bg(palette.accent)
+                .add_modifier(Modifier::BOLD),
+        )),
+        RowText::Device { name, flags, badge } => {
+            let mut spans = vec![Span::styled(
+                crate::model::truncate_cols(name, name_cols),
+                Style::default().fg(palette.text),
+            )];
+            for (text, tone) in flags {
+                spans.push(Span::styled(
+                    format!(" {text}"),
+                    Style::default().fg(tone_color(*tone, palette)),
+                ));
+            }
+            if let Some(badge) = badge {
+                spans.push(Span::raw("  "));
+                spans.push(Span::styled(
+                    badge.text.clone(),
+                    Style::default().fg(tone_color(badge.tone, palette)),
+                ));
+            }
+            Line::from(spans)
+        }
+    }
+}
+
 fn draw_details(frame: &mut Frame, app: &mut App, area: Rect, palette: Palette) {
     let title = if app.advanced {
         " 详情 · 高级 "
@@ -140,7 +185,7 @@ fn draw_details(frame: &mut Frame, app: &mut App, area: Rect, palette: Palette) 
     };
     let block = panel(title, palette);
     let inner = block.inner(area);
-    let lines = app.details();
+    let lines = details_lines(&app.details(), palette);
     let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
     let total = paragraph.line_count(inner.width) as u16;
     let max_scroll = total.saturating_sub(inner.height);
@@ -164,6 +209,46 @@ fn draw_details(frame: &mut Frame, app: &mut App, area: Rect, palette: Palette) 
             &mut state,
         );
     }
+}
+
+fn details_lines(details: &Details, palette: Palette) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    match details {
+        Details::Empty => lines.push(Line::from(Span::styled(
+            "没有检测到外设",
+            Style::default().fg(palette.faint),
+        ))),
+        Details::Device {
+            title,
+            tags,
+            lines: body,
+        } => {
+            lines.push(Line::from(Span::styled(
+                title.clone(),
+                Style::default().add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(Span::styled(
+                tags.clone(),
+                Style::default().fg(palette.accent),
+            )));
+            lines.push(Line::from(""));
+            for line in body {
+                let spans: Vec<Span> = line
+                    .spans
+                    .iter()
+                    .map(|span| {
+                        let mut style = Style::default().fg(tone_color(span.tone, palette));
+                        if span.bold {
+                            style = style.add_modifier(Modifier::BOLD);
+                        }
+                        Span::styled(span.text.clone(), style)
+                    })
+                    .collect();
+                lines.push(Line::from(spans));
+            }
+        }
+    }
+    lines
 }
 
 fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
@@ -359,5 +444,86 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
         y: area.y + (area.height - height) / 2,
         width,
         height,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn app() -> App {
+        let mut app = App::for_test(testing::snapshot(), crate::config::Config::default());
+        app.batteries = testing::batteries();
+        app.rebuild();
+        app
+    }
+
+    fn dump(app: &mut App, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| draw(frame, app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut out = String::new();
+        for y in 0..height {
+            let mut skip = false;
+            for x in 0..width {
+                if skip {
+                    skip = false;
+                    continue;
+                }
+                let symbol = buffer[(x, y)].symbol();
+                out.push_str(symbol);
+                skip = UnicodeWidthStr::width(symbol) == 2;
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn renders_fixture_overview() {
+        let mut app = app();
+        let text = dump(&mut app, 120, 30);
+        assert!(text.contains("RhubTui"), "{text}");
+        assert!(text.contains("4 个设备"), "{text}");
+        assert!(text.contains("PSSD T7"), "{text}");
+        assert!(text.contains("A5 Pro Max"), "{text}");
+        assert!(text.contains("73%"), "{text}");
+        assert!(text.contains("扩展坞"), "{text}");
+        assert!(text.contains("概览"), "{text}");
+    }
+
+    #[test]
+    fn renders_advanced_details() {
+        let mut app = app();
+        app.advanced = true;
+        let text = dump(&mut app, 120, 30);
+        assert!(text.contains("高级"), "{text}");
+        assert!(text.contains("VID:PID"), "{text}");
+    }
+
+    #[test]
+    fn renders_help_and_eject_modal() {
+        let mut app = app();
+        app.show_help = true;
+        let text = dump(&mut app, 120, 34);
+        assert!(text.contains("帮助"), "{text}");
+        app.show_help = false;
+        app.modal = Some(Confirm::Eject {
+            device: "/dev/sda".into(),
+            label: "T7".into(),
+        });
+        let text = dump(&mut app, 120, 30);
+        assert!(text.contains("安全弹出"), "{text}");
+        assert!(text.contains("/dev/sda"), "{text}");
+    }
+
+    #[test]
+    fn tiny_terminal_gets_a_hint_instead_of_panicking() {
+        let mut app = app();
+        let text = dump(&mut app, 40, 10);
+        assert!(text.contains("终端太小"), "{text}");
     }
 }

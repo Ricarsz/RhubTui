@@ -8,9 +8,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use ratatui::crossterm::event::{self, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthStr;
+use ratatui::style::Color;
 
 use crate::battery;
 use crate::config::Config;
@@ -19,6 +17,7 @@ use crate::model::*;
 use crate::mount;
 use crate::scan;
 use crate::theme::Palette;
+use crate::view::{self, Row};
 
 const RETRY_AFTER: Duration = Duration::from_secs(20);
 const LOADING_TIMEOUT: Duration = Duration::from_secs(15);
@@ -37,26 +36,6 @@ pub enum Msg {
     Snapshot(Box<scan::Snapshot>),
 }
 
-pub struct Row {
-    pub line: Line<'static>,
-    pub device: Option<usize>,
-}
-
-impl Row {
-    fn section(title: &str, palette: Palette) -> Self {
-        Self {
-            line: Line::from(Span::styled(
-                format!(" {title} "),
-                Style::default()
-                    .fg(palette.surface)
-                    .bg(palette.accent)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            device: None,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Confirm {
     Eject { device: String, label: String },
@@ -70,8 +49,6 @@ pub struct App {
     pub list_area: ratatui::layout::Rect,
     pub details_area: ratatui::layout::Rect,
     pub list_offset: usize,
-    /// 列表里设备名可用的显示列数，随窗口宽度调整。
-    pub name_cols: usize,
     pub selected_key: Option<String>,
     pub batteries: HashMap<String, Battery>,
     pub part_sel: HashMap<String, usize>,
@@ -109,23 +86,45 @@ pub struct App {
 
 impl App {
     pub fn new(config: Config) -> Self {
+        let (tx, rx) = mpsc::channel();
+        let battery_tx = spawn_battery_worker(tx.clone());
+        let scan_tx = spawn_scan_worker(tx.clone());
+        let snapshot = scan::scan();
+        let mut app = Self::assemble(snapshot, config, tx, rx, battery_tx, scan_tx);
+        app.request_all_batteries();
+        app.rebuild();
+        app
+    }
+
+    /// 用给定快照搭一个不启动后台线程的 App，供测试与将来的离线渲染使用。
+    #[cfg(test)]
+    pub fn for_test(snapshot: scan::Snapshot, config: Config) -> Self {
+        let (tx, rx) = mpsc::channel();
+        let (battery_tx, _battery_rx) = mpsc::channel();
+        let (scan_tx, _scan_rx) = mpsc::channel();
+        Self::assemble(snapshot, config, tx, rx, battery_tx, scan_tx)
+    }
+
+    fn assemble(
+        snapshot: scan::Snapshot,
+        config: Config,
+        tx: Sender<Msg>,
+        rx: Receiver<Msg>,
+        battery_tx: Sender<HidInfo>,
+        scan_tx: Sender<()>,
+    ) -> Self {
         let scan_interval = config.scan_interval();
         let battery_refresh = config.battery_refresh();
         let mouse = config.mouse;
         let theme = config.theme.clone();
-        let (tx, rx) = mpsc::channel();
-        let battery_tx = spawn_battery_worker(tx.clone());
-        let scan_tx = spawn_scan_worker(tx.clone());
-        let snap = scan::scan();
-        let signature = snapshot_signature(&snap);
+        let signature = snapshot_signature(&snapshot);
         let mut app = Self {
-            snap,
+            snap: snapshot,
             rows: Vec::new(),
             selected: 0,
             list_area: ratatui::layout::Rect::default(),
             details_area: ratatui::layout::Rect::default(),
             list_offset: 0,
-            name_cols: 26,
             selected_key: None,
             batteries: HashMap::new(),
             part_sel: HashMap::new(),
@@ -162,7 +161,6 @@ impl App {
 
         app.rebuild();
         app.select_first();
-        app.request_all_batteries();
         app.rebuild();
         app
     }
@@ -241,19 +239,8 @@ impl App {
 
     // ─── list building ─────────────────────────────────────────────────────
 
-    /// 窗口宽度变化时调整名称列，必要时重建带样式的行。
-    pub fn set_name_width(&mut self, cols: usize) {
-        let cols = cols.clamp(8, 34);
-        if self.name_cols != cols {
-            self.name_cols = cols;
-            self.rebuild();
-            self.dirty = true;
-        }
-    }
-
-    fn rebuild(&mut self) {
+    pub(crate) fn rebuild(&mut self) {
         let key = self.selected_key.clone();
-        let palette = self.palette();
         let mut rows = Vec::new();
         let needle = self.filter.trim().to_lowercase();
 
@@ -273,13 +260,11 @@ impl App {
             }
             indices.sort_by_key(|i| self.snap.peripherals[*i].name().to_lowercase());
 
-            rows.push(Row::section(category.title(), palette));
+            rows.push(Row::section(category.title()));
             for index in indices {
-                let line = self.device_line(index);
-                rows.push(Row {
-                    line,
-                    device: Some(index),
-                });
+                let peripheral = &self.snap.peripherals[index];
+                let battery = peripheral.battery_hid().map(|hid| self.battery_of(hid));
+                rows.push(Row::device(index, peripheral, battery.as_ref()));
             }
         }
 
@@ -300,77 +285,6 @@ impl App {
             .position(|row| row.device.is_some())
             .unwrap_or(0);
         self.dirty = true;
-    }
-
-    fn device_line(&self, index: usize) -> Line<'static> {
-        let peripheral = &self.snap.peripherals[index];
-        let palette = self.palette();
-        let mut spans = vec![Span::styled(
-            truncate_cols(&peripheral.name(), self.name_cols),
-            Style::default().fg(palette.text),
-        )];
-        if peripheral.usb.place.is_internal() {
-            spans.push(Span::styled(" 内置", Style::default().fg(palette.faint)));
-        } else if peripheral.usb.on_dock() {
-            spans.push(Span::styled(" 坞上", Style::default().fg(palette.dim)));
-        }
-        if let Some((text, color)) = self.badge(peripheral) {
-            spans.push(Span::raw("  "));
-            spans.push(Span::styled(text, Style::default().fg(color)));
-        }
-        Line::from(spans)
-    }
-
-    fn badge(&self, peripheral: &Peripheral) -> Option<(String, Color)> {
-        let palette = self.palette();
-        if let Some(hid) = peripheral.battery_hid() {
-            match self.battery_of(hid) {
-                Battery::Ok { pct, .. } => {
-                    return Some((self.battery_of(hid).label(), battery_color(pct, palette)));
-                }
-                Battery::Loading => return Some(("读取中".into(), palette.faint)),
-                Battery::Err(_) => return Some(("电量?".into(), palette.bad)),
-                Battery::Unknown => {}
-            }
-        }
-
-        if !peripheral.disks.is_empty() {
-            let partitions: usize = peripheral.disks.iter().map(|d| d.partitions.len()).sum();
-            if peripheral.disks.iter().any(Disk::mounted) {
-                return Some(("已挂载".into(), palette.good));
-            }
-            if partitions > 0 {
-                return Some(("未挂载".into(), palette.warn));
-            }
-            return Some(("无介质".into(), palette.faint));
-        }
-
-        if peripheral.usb.is_hub() {
-            let text = match peripheral.usb.hub_kind.unwrap_or(HubKind::Hub) {
-                HubKind::Dock => format!("扩展坞 · {} 口", peripheral.usb.maxchild),
-                HubKind::Hub => {
-                    let mut text = format!("{} 口", peripheral.usb.maxchild);
-                    if !peripheral.usb.children.is_empty() {
-                        text.push_str(&format!(" · {} 台", peripheral.usb.children.len()));
-                    }
-                    text
-                }
-            };
-            return Some((text, palette.faint));
-        }
-
-        if peripheral.category == Category::Input
-            && !peripheral.hids.is_empty()
-            && peripheral.battery_hid().is_none()
-        {
-            return Some(("无电量".into(), palette.faint));
-        }
-
-        let functions = peripheral.functions();
-        if !functions.is_empty() && peripheral.category != Category::Other {
-            return Some((functions.join(" · "), palette.faint));
-        }
-        None
     }
 
     // ─── selection ─────────────────────────────────────────────────────────
@@ -1104,563 +1018,15 @@ impl App {
     // ─── details pane ──────────────────────────────────────────────────────
 
     /// 默认展示一眼能看懂的概览，按 `a` 切到技术细节。
-    pub fn details(&self) -> Vec<Line<'static>> {
-        if self.advanced {
-            self.details_advanced()
-        } else {
-            self.details_overview()
-        }
-    }
-
-    fn details_advanced(&self) -> Vec<Line<'static>> {
-        let palette = self.palette();
-        let Some(peripheral) = self.selected_peripheral() else {
-            return vec![Line::from(Span::styled(
-                "没有检测到外设",
-                Style::default().fg(palette.faint),
-            ))];
-        };
-
-        let usb = &peripheral.usb;
-        let mut lines = Vec::new();
-        lines.push(Line::from(Span::styled(
-            peripheral.name(),
-            Style::default().add_modifier(Modifier::BOLD),
-        )));
-        let mut tags = vec![peripheral.category.title().to_string()];
-        tags.push(usb.place.label().to_string());
-        if usb.on_dock() {
-            tags.push("经扩展坞".into());
-        }
-        lines.push(Line::from(Span::styled(
-            tags.join(" · "),
-            Style::default().fg(palette.accent),
-        )));
-        lines.push(Line::from(""));
-
-        // 连接方式
-        lines.push(section_title("连接", palette));
-        lines.push(kv(
-            "归属",
-            format!("{} · {}", usb.place.label(), usb.place_reason),
-        ));
-        lines.push(kv("位置", usb.attachment()));
-        if let Some(dock) = &usb.dock
-            && usb.hub_kind != Some(HubKind::Dock)
-        {
-            lines.push(kv("扩展坞", dock.clone()));
-        }
-        if let Some(controller) = &usb.controller {
-            lines.push(kv("控制器", controller.label()));
-        }
-        lines.push(kv("链路", self.chain_of(peripheral)));
-        let version = if usb.usb_version.is_empty() {
-            String::new()
-        } else {
-            format!("USB {} · ", usb.usb_version)
-        };
-        lines.push(kv("速率", format!("{version}{}", speed_label(&usb.speed))));
-        lines.push(kv(
-            "地址",
-            format!(
-                "bus {} · dev {} · {}（端口 {}）",
-                usb.bus,
-                usb.devnum,
-                usb.sysfs,
-                usb.port.unwrap_or(0)
-            ),
-        ));
-        if let Some(power) = usb.power_ma {
-            lines.push(kv("供电", format!("{power} mA（配置上限）")));
-        }
-        lines.push(kv("VID:PID", usb.id()));
-        lines.push(kv(
-            "类别",
-            format!(
-                "{:02x}/{:02x}/{:02x} {}",
-                usb.class,
-                usb.subclass,
-                usb.protocol,
-                usb.class_name(usb.class)
-            ),
-        ));
-        if !usb.manufacturer.is_empty() {
-            lines.push(kv("厂商", usb.manufacturer.clone()));
-        }
-        if !usb.product.is_empty() {
-            lines.push(kv("型号", usb.product.clone()));
-        }
-        if !usb.bcd_device.is_empty() {
-            lines.push(kv("版本", format!("bcdDevice {}", usb.bcd_device)));
-        }
-        if !usb.serial.is_empty() {
-            lines.push(kv("序列号", usb.serial.clone()));
-        }
-        lines.push(kv(
-            "配置",
-            format!(
-                "{} 个接口 · {} 组配置 · LTM {} · {}",
-                usb.num_interfaces,
-                usb.num_configs,
-                if usb.ltm_capable {
-                    "支持"
-                } else {
-                    "不支持"
-                },
-                if usb.authorized {
-                    "已授权"
-                } else {
-                    "未授权"
-                }
-            ),
-        ));
-
-        if !usb.ifaces.is_empty() {
-            lines.push(Line::from(""));
-            lines.push(section_title("USB 接口", palette));
-            for iface in &usb.ifaces {
-                let mut text = format!(
-                    "  {:<2} {} {:02x}/{:02x}/{:02x}  {} 端点",
-                    iface.number,
-                    pad_right(iface.function(), 12),
-                    iface.class,
-                    iface.subclass,
-                    iface.protocol,
-                    iface.endpoints
-                );
-                if !iface.driver.is_empty() {
-                    text.push_str(&format!("  → {}", iface.driver));
-                }
-                lines.push(Line::from(text));
-            }
-        }
-
-        if !peripheral.hids.is_empty() {
-            lines.push(Line::from(""));
-            lines.push(section_title("HID", palette));
-            for hid in &peripheral.hids {
-                let iface = hid
-                    .iface
-                    .map(|iface| format!("iface {iface}"))
-                    .unwrap_or_else(|| "iface ?".into());
-                let pages: Vec<String> = hid
-                    .pages
-                    .iter()
-                    .map(|page| format!("0x{page:04X} {}", page_name(*page)))
-                    .collect();
-                lines.push(Line::from(format!(
-                    "  {iface} · {} · {}",
-                    hid.node,
-                    hid.protocol_name()
-                )));
-                lines.push(Line::from(Span::styled(
-                    format!("       {}", pages.join(" ")),
-                    Style::default().fg(palette.dim),
-                )));
-                if hid.has_battery() {
-                    lines.push(self.battery_lines(hid, palette));
-                }
-            }
-        }
-
-        if !peripheral.disks.is_empty() {
-            lines.push(Line::from(""));
-            lines.push(section_title("存储", palette));
-            let selected = self.part_index(peripheral);
-            let mut flat = 0;
-            for disk in &peripheral.disks {
-                let size = if disk.size == 0 {
-                    "无介质".to_string()
-                } else {
-                    human_size(disk.size)
-                };
-                let mut header = format!("  {}  {}", disk.path, size);
-                if !disk.model.is_empty() {
-                    header.push_str(&format!("  {}", disk.model));
-                }
-                if !disk.ptable.is_empty() {
-                    header.push_str(&format!("  {}", disk.ptable.to_uppercase()));
-                }
-                if disk.size > 0 {
-                    header.push_str(if disk.rotational {
-                        "  · 机械"
-                    } else {
-                        "  · 固态"
-                    });
-                }
-                if !disk.transport.is_empty() {
-                    header.push_str(&format!("  · {}", disk.transport));
-                }
-                if disk.removable {
-                    header.push_str("  · 可移动");
-                }
-                lines.push(Line::from(header));
-                if !disk.serial.is_empty() {
-                    lines.push(Line::from(Span::styled(
-                        format!("      序列号 {}", disk.serial),
-                        Style::default().fg(palette.faint),
-                    )));
-                }
-                if let Some(mount) = &disk.mount {
-                    lines.push(kv_indent("挂载", mount_label(mount), palette));
-                }
-                for partition in &disk.partitions {
-                    let marker = if flat == selected { "▸" } else { " " };
-                    let mut text = format!(
-                        "  {marker} {}  {}",
-                        partition.name,
-                        human_size(partition.size)
-                    );
-                    if !partition.fstype.is_empty() {
-                        text.push_str(&format!("  {}", partition.fstype));
-                    }
-                    if !partition.label.is_empty() {
-                        text.push_str(&format!("  {}", partition.label));
-                    }
-                    if let Some(mount) = &partition.mount {
-                        text.push_str(&format!("  → {}", mount.path));
-                        if mount.read_only {
-                            text.push_str(" (ro)");
-                        }
-                    }
-                    let style = if flat == selected {
-                        Style::default().fg(palette.accent)
-                    } else {
-                        Style::default()
-                    };
-                    lines.push(Line::from(Span::styled(text, style)));
-                    if !partition.uuid.is_empty() {
-                        lines.push(Line::from(Span::styled(
-                            format!("      UUID {}", partition.uuid),
-                            Style::default().fg(palette.faint),
-                        )));
-                    }
-                    if let Some(mount) = &partition.mount
-                        && let (Some(pct), Some(label)) = (mount.used_pct(), mount.usage_label())
-                    {
-                        lines.push(Line::from(Span::styled(
-                            format!("      {}  {label}", usage_bar(pct, 8)),
-                            Style::default().fg(usage_color(pct, palette)),
-                        )));
-                    }
-                    flat += 1;
-                }
-            }
-            if peripheral.disks.iter().all(|d| d.partitions.is_empty()) {
-                let hint = if peripheral.disks.iter().any(|d| d.size > 0) {
-                    "  整盘无分区表 · m 直接挂载整盘"
-                } else {
-                    "  没有分区（未插介质？）"
-                };
-                lines.push(Line::from(Span::styled(
-                    hint,
-                    Style::default().fg(palette.faint),
-                )));
-            }
-            lines.push(Line::from(Span::styled(
-                "  h/l 选分区 · m 挂载 · u 卸载 · e 弹出",
-                Style::default().fg(palette.faint),
-            )));
-        }
-
-        if let Some(audio) = &peripheral.audio {
-            lines.push(Line::from(""));
-            lines.push(section_title("音频", palette));
-            lines.push(kv(
-                "声卡",
-                format!(
-                    "card {} [{}] · {} · {}",
-                    audio.index, audio.id, audio.driver, audio.name
-                ),
-            ));
-            for pcm in &audio.pcms {
-                lines.push(Line::from(format!("  {pcm}")));
-            }
-        }
-
-        if !peripheral.nets.is_empty() {
-            lines.push(Line::from(""));
-            lines.push(section_title("网络", palette));
-            for net in &peripheral.nets {
-                let mut text = net.label();
-                if !net.driver.is_empty() {
-                    text.push_str(&format!(" · {}", net.driver));
-                }
-                lines.push(Line::from(format!("  {text}")));
-            }
-        }
-
-        let mut nodes = Vec::new();
-        if !peripheral.videos.is_empty() {
-            nodes.push(("视频", peripheral.videos.join(" ")));
-        }
-        if !peripheral.ttys.is_empty() {
-            nodes.push(("串口", peripheral.ttys.join(" ")));
-        }
-        if !peripheral.printers.is_empty() {
-            nodes.push(("打印", peripheral.printers.join(" ")));
-        }
-        if !nodes.is_empty() {
-            lines.push(Line::from(""));
-            for (label, value) in nodes {
-                lines.push(kv(label, value));
-            }
-        }
-
-        if usb.is_hub() {
-            lines.push(Line::from(""));
-            lines.push(section_title("Hub", palette));
-            lines.push(kv(
-                "形态",
-                format!(
-                    "{} · {} 个下行口",
-                    usb.hub_kind.unwrap_or(HubKind::Hub).label(),
-                    usb.maxchild
-                ),
-            ));
-            if !usb.children.is_empty() {
-                let names: Vec<String> = usb
-                    .children
-                    .iter()
-                    .map(|child| self.name_of(child))
-                    .collect();
-                lines.push(kv("下挂", names.join("、")));
-            }
-        }
-
-        lines
-    }
-
-    /// 面向普通用户的概览：设备名、电量、连接方式，以及少量关键信息。
-    fn details_overview(&self) -> Vec<Line<'static>> {
-        let palette = self.palette();
-        let Some(peripheral) = self.selected_peripheral() else {
-            return vec![Line::from(Span::styled(
-                "没有检测到外设",
-                Style::default().fg(palette.faint),
-            ))];
-        };
-
-        let usb = &peripheral.usb;
-        let battery_hid = peripheral.battery_hid();
-        let wireless = battery_hid.and_then(|hid| self.battery_of(hid).wireless());
-        let connection = match wireless {
-            Some(true) => Some("2.4G 无线"),
-            Some(false) => Some("USB 有线"),
-            None => peripheral.connection(),
-        };
-
-        let mut lines = Vec::new();
-        lines.push(Line::from(Span::styled(
-            peripheral.name(),
-            Style::default().add_modifier(Modifier::BOLD),
-        )));
-        let mut tags = vec![peripheral.kind_label().to_string()];
-        if let Some(connection) = connection {
-            tags.push(connection.to_string());
-        }
-        tags.push(usb.place.label().to_string());
-        if usb.on_dock() {
-            tags.push("经扩展坞".into());
-        }
-        lines.push(Line::from(Span::styled(
-            tags.join(" · "),
-            Style::default().fg(palette.accent),
-        )));
-        lines.push(Line::from(""));
-
-        if let Some(hid) = battery_hid {
-            lines.push(section_title("电量", palette));
-            match self.battery_of(hid) {
-                Battery::Ok { pct, charging, .. } => {
-                    lines.push(Line::from(vec![
-                        Span::raw("  "),
-                        Span::styled(
-                            battery_bar(pct, 16),
-                            Style::default()
-                                .fg(battery_color(pct, palette))
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                    ]));
-                    let (state, color) = if charging {
-                        ("充电中", palette.good)
-                    } else {
-                        ("使用中", palette.dim)
-                    };
-                    lines.push(Line::from(Span::styled(
-                        format!("  {state}"),
-                        Style::default().fg(color),
-                    )));
-                }
-                Battery::Loading => lines.push(Line::from(Span::styled(
-                    "  读取中…",
-                    Style::default().fg(palette.faint),
-                ))),
-                Battery::Unknown => lines.push(Line::from(Span::styled(
-                    "  未检测到电量通道",
-                    Style::default().fg(palette.faint),
-                ))),
-                Battery::Err(error) => lines.push(Line::from(Span::styled(
-                    format!("  读取失败：{error}"),
-                    Style::default().fg(palette.bad),
-                ))),
-            }
-            lines.push(Line::from(""));
-        }
-
-        let mut rows: Vec<(&str, String)> = Vec::new();
-        rows.push(("类型", peripheral.kind_label().to_string()));
-        if let Some(connection) = connection {
-            rows.push(("连接", connection.to_string()));
-        }
-        if let Some(dpi) = battery_hid.and_then(|hid| self.battery_of(hid).dpi()) {
-            rows.push(("DPI档位", format!("{dpi} 档")));
-        }
-        if let Some(hz) = battery_hid.and_then(|hid| self.battery_of(hid).hz())
-            && wireless != Some(true)
-        {
-            rows.push(("回报率", format!("{hz} Hz")));
-        }
-        rows.push(("位置", usb.friendly_attachment()));
-
-        if !peripheral.disks.is_empty() {
-            let partitions: usize = peripheral
-                .disks
-                .iter()
-                .map(|disk| disk.partitions.len())
-                .sum();
-            let mounted = peripheral.disks.iter().any(Disk::mounted);
-            rows.push((
-                "存储",
-                format!(
-                    "{partitions} 个分区 · {}",
-                    if mounted { "已挂载" } else { "未挂载" }
-                ),
-            ));
-            let mount_point = peripheral.disks.iter().find_map(|disk| {
-                disk.mount
-                    .as_ref()
-                    .or_else(|| disk.partitions.iter().find_map(|part| part.mount.as_ref()))
-            });
-            if let Some(mount) = mount_point {
-                let mut value = mount.path.clone();
-                if let Some(usage) = mount.usage_label() {
-                    value.push_str(&format!(" · {usage}"));
-                }
-                if mount.read_only {
-                    value.push_str(" (ro)");
-                }
-                rows.push(("挂载", value));
-            }
-        }
-
-        if let Some(audio) = &peripheral.audio {
-            rows.push(("音频", format!("card {} · {}", audio.index, audio.name)));
-        }
-        if let Some(net) = peripheral.nets.first() {
-            rows.push(("网络", net.label()));
-        }
-        if usb.is_hub() {
-            rows.push((
-                "扩展坞",
-                format!(
-                    "{} · {} 台下挂",
-                    usb.hub_kind.unwrap_or(HubKind::Hub).label(),
-                    usb.children.len()
-                ),
-            ));
-        }
-
-        if !rows.is_empty() {
-            lines.push(section_title("关键信息", palette));
-            for (key, value) in rows {
-                lines.push(kv(key, value));
-            }
-        }
-
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "  a 查看高级详情 · b 重新读取电量 · r 重新扫描",
-            Style::default().fg(palette.faint),
-        )));
-        lines
-    }
-
-    fn chain_of(&self, peripheral: &Peripheral) -> String {
-        let usb = &peripheral.usb;
-        let mut parts = Vec::new();
-        if let Some(controller) = &usb.controller {
-            parts.push(controller.slot.clone());
-        }
-        let root_port = usb
-            .root_port
-            .map(|port| format!("根端口 {port}"))
-            .unwrap_or_else(|| "根端口".into());
-        parts.push(root_port);
-        for ancestor in &usb.chain {
-            parts.push(format!("{}「{}」", ancestor, self.name_of(ancestor)));
-        }
-        parts.push(usb.sysfs.clone());
-        parts.join(" → ")
-    }
-
-    fn name_of(&self, sysfs: &str) -> String {
-        self.snap
-            .peripherals
-            .iter()
-            .find(|peripheral| peripheral.usb.sysfs == sysfs)
-            .map(Peripheral::name)
-            .unwrap_or_else(|| sysfs.to_string())
-    }
-
-    fn battery_lines(&self, hid: &HidInfo, palette: Palette) -> Line<'static> {
-        let mut spans = vec![Span::styled(
-            "      电量 ",
-            Style::default().fg(palette.dim),
-        )];
-        match self.battery_of(hid) {
-            Battery::Ok {
-                pct, charging, hz, ..
-            } => {
-                spans.push(Span::styled(
-                    battery_bar(pct, 10),
-                    Style::default().fg(battery_color(pct, palette)),
-                ));
-                let mut extra = Vec::new();
-                if charging {
-                    extra.push("充电中".to_string());
-                }
-                if let Some(hz) = hz {
-                    extra.push(format!("{hz} Hz"));
-                }
-                if !extra.is_empty() {
-                    spans.push(Span::styled(
-                        format!("  {}", extra.join(" · ")),
-                        Style::default().fg(palette.dim),
-                    ));
-                }
-            }
-            Battery::Loading => {
-                spans.push(Span::styled("读取中…", Style::default().fg(palette.faint)))
-            }
-            Battery::Unknown => spans.push(Span::styled(
-                "—（该接口无已知协议）",
-                Style::default().fg(palette.faint),
-            )),
-            Battery::Err(error) => {
-                spans.push(Span::styled(
-                    format!("读取失败：{error}"),
-                    Style::default().fg(palette.bad),
-                ));
-                if error.contains("Permission denied") {
-                    spans.push(Span::styled(
-                        "（见 README 的 udev 规则）",
-                        Style::default().fg(palette.faint),
-                    ));
-                }
-            }
-        }
-        Line::from(spans)
+    pub fn details(&self) -> view::Details {
+        let index = self.rows.get(self.selected).and_then(|row| row.device);
+        view::details(
+            &self.snap,
+            index,
+            &self.batteries,
+            &self.part_sel,
+            self.advanced,
+        )
     }
 }
 
@@ -1669,102 +1035,6 @@ impl App {
 /// 连续失败时退避：20s → 40s → 80s → 160s。
 fn retry_interval(tries: u32) -> Duration {
     RETRY_AFTER * (1u32 << tries.min(3))
-}
-
-fn section_title(title: &'static str, palette: Palette) -> Line<'static> {
-    Line::from(Span::styled(
-        title,
-        Style::default()
-            .fg(palette.accent)
-            .add_modifier(Modifier::BOLD),
-    ))
-}
-
-fn pad_right(text: &str, width: usize) -> String {
-    let mut text = text.to_string();
-    let used = UnicodeWidthStr::width(text.as_str());
-    if used < width {
-        text.push_str(&" ".repeat(width - used));
-    }
-    text
-}
-
-fn kv(key: &str, value: String) -> Line<'static> {
-    kv_styled(key, value, Color::Reset)
-}
-
-fn kv_styled(key: &str, value: String, color: Color) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(
-            format!("{} ", pad_right(key, 8)),
-            Style::default().fg(Color::DarkGray),
-        ),
-        Span::styled(value, Style::default().fg(color)),
-    ])
-}
-
-fn kv_indent(key: &str, value: String, palette: Palette) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(
-            format!("      {} ", pad_right(key, 5)),
-            Style::default().fg(Color::DarkGray),
-        ),
-        Span::styled(value, Style::default().fg(palette.dim)),
-    ])
-}
-
-fn mount_label(mount: &MountPoint) -> String {
-    let mut text = mount.path.clone();
-    if mount.read_only {
-        text.push_str(" (ro)");
-    }
-    if let Some(usage) = mount.usage_label() {
-        text.push_str(&format!(" · {usage}"));
-    }
-    text
-}
-
-fn page_name(page: u16) -> &'static str {
-    match page {
-        0x0001 => "generic",
-        0x0002 => "simulation",
-        0x0005 => "game",
-        0x0006 => "device",
-        0x0007 => "keyboard",
-        0x0008 => "led",
-        0x0009 => "button",
-        0x000A => "ordinal",
-        0x000B => "telephony",
-        0x000C => "consumer",
-        0x000D => "digitizer",
-        0x000E => "haptics",
-        0x0012 => "oscilloscope",
-        0x0014 => "barcode",
-        0x0020 => "sensors",
-        0x0084 => "power",
-        0xFF00..=0xFFFF => "vendor",
-        _ => "",
-    }
-}
-
-fn battery_color(pct: u8, palette: Palette) -> Color {
-    if pct <= 20 {
-        palette.bad
-    } else if pct <= 40 {
-        palette.warn
-    } else {
-        palette.good
-    }
-}
-
-fn usage_color(pct: u8, palette: Palette) -> Color {
-    if pct >= 90 {
-        palette.bad
-    } else if pct >= 75 {
-        palette.warn
-    } else {
-        palette.good
-    }
 }
 
 /// 只比较影响界面/操作的字段，避免每秒重建列表和详情。
@@ -1888,10 +1158,104 @@ mod tests {
         assert_eq!(retry_interval(99), Duration::from_secs(160));
     }
 
+    fn fixture_app() -> App {
+        App::for_test(crate::testing::snapshot(), Config::default())
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
     #[test]
-    fn pads_by_display_width() {
-        assert_eq!(pad_right("abc", 5), "abc  ");
-        assert_eq!(pad_right("中文", 6), "中文  ");
-        assert_eq!(pad_right("abcdef", 3), "abcdef");
+    fn navigation_skips_category_sections() {
+        let mut app = fixture_app();
+        assert_eq!(app.selected_peripheral().unwrap().name(), "PSSD T7");
+        app.on_key(key(KeyCode::Char('j')));
+        assert_eq!(app.selected_peripheral().unwrap().name(), "A5 Pro Max");
+        app.on_key(key(KeyCode::Char('j')));
+        assert_eq!(app.selected_peripheral().unwrap().name(), "USB4 Dock");
+        app.on_key(key(KeyCode::Char('G')));
+        assert_eq!(
+            app.selected_peripheral().unwrap().name(),
+            "Integrated Camera"
+        );
+        app.on_key(key(KeyCode::Char('g')));
+        assert_eq!(app.selected_peripheral().unwrap().name(), "PSSD T7");
+    }
+
+    #[test]
+    fn filter_mode_narrows_the_list() {
+        let mut app = fixture_app();
+        app.on_key(key(KeyCode::Char('/')));
+        for ch in "usb4".chars() {
+            app.on_key(key(KeyCode::Char(ch)));
+        }
+        assert!(app.filter_editing);
+        assert_eq!(app.visible_count(), 1);
+        assert_eq!(app.selected_peripheral().unwrap().name(), "USB4 Dock");
+        app.on_key(key(KeyCode::Enter));
+        assert!(!app.filter_editing);
+        assert_eq!(app.filter, "usb4");
+    }
+
+    #[test]
+    fn internal_devices_can_be_hidden() {
+        let mut app = fixture_app();
+        assert_eq!(app.visible_count(), 4);
+        app.on_key(key(KeyCode::Char('i')));
+        assert!(!app.show_internal);
+        assert_eq!(app.visible_count(), 3);
+        app.on_key(key(KeyCode::Char('i')));
+        assert_eq!(app.visible_count(), 4);
+    }
+
+    #[test]
+    fn help_and_details_advanced_toggle() {
+        let mut app = fixture_app();
+        app.on_key(key(KeyCode::Char('?')));
+        assert!(app.show_help);
+        app.on_key(key(KeyCode::Char('j')));
+        assert!(app.show_help);
+        assert_eq!(app.help_scroll, 3);
+        app.on_key(key(KeyCode::Char('x')));
+        assert!(!app.show_help);
+        assert_eq!(app.help_scroll, 0);
+
+        assert!(!app.advanced);
+        app.on_key(key(KeyCode::Char('a')));
+        assert!(app.advanced);
+        app.on_key(key(KeyCode::Char('a')));
+        assert!(!app.advanced);
+    }
+
+    #[test]
+    fn eject_requires_unmounted_disk_and_confirms() {
+        let mut app = fixture_app();
+        app.on_key(key(KeyCode::Char('e')));
+        assert!(app.modal.is_none(), "挂载中的磁盘不应进入弹出确认");
+        assert!(app.status_line().0.contains("先卸载"));
+
+        app.snap.peripherals[0].disks[0].partitions[0].mount = None;
+        app.rebuild();
+        app.on_key(key(KeyCode::Char('e')));
+        match app.modal.as_ref() {
+            Some(Confirm::Eject { device, .. }) => assert_eq!(device, "/dev/sda"),
+            other => panic!("应打开弹出确认，实际 {other:?}"),
+        }
+        app.on_key(key(KeyCode::Esc));
+        assert!(app.modal.is_none());
+        assert!(!app.quitting);
+    }
+
+    #[test]
+    fn theme_cycles_through_known_names() {
+        let mut app = fixture_app();
+        assert_eq!(app.theme, "ocean");
+        app.on_key(key(KeyCode::Char('t')));
+        assert_eq!(app.theme, "forest");
+        app.on_key(key(KeyCode::Char('t')));
+        assert_eq!(app.theme, "sunset");
+        app.on_key(key(KeyCode::Char('t')));
+        assert_eq!(app.theme, "ocean");
     }
 }

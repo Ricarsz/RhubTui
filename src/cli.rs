@@ -98,7 +98,11 @@ fn list(json: bool) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&peripherals)?);
         return Ok(());
     }
+    println!("{}", render_table(&list_rows(&snapshot)));
+    Ok(())
+}
 
+fn list_rows(snapshot: &Snapshot) -> Vec<Vec<String>> {
     let mut rows = vec![vec![
         "PORT".to_string(),
         "LINK".to_string(),
@@ -119,25 +123,33 @@ fn list(json: bool) -> Result<()> {
             extra_summary(peripheral),
         ]);
     }
+    rows
+}
 
-    let mut widths = vec![0usize; rows[0].len()];
-    for row in &rows {
+/// 对齐成纯文本表格；返回不含结尾换行的多行字符串。
+fn render_table(rows: &[Vec<String>]) -> String {
+    let columns = rows.first().map_or(0, Vec::len);
+    let mut widths = vec![0usize; columns];
+    for row in rows {
         for (index, cell) in row.iter().enumerate() {
             widths[index] = widths[index].max(UnicodeWidthStr::width(cell.as_str()));
         }
     }
-    for row in &rows {
-        let mut line = String::new();
-        for (index, cell) in row.iter().enumerate() {
-            if index + 1 == row.len() {
-                line.push_str(cell);
-            } else {
-                line.push_str(&pad(cell, widths[index] + 2));
+    let lines: Vec<String> = rows
+        .iter()
+        .map(|row| {
+            let mut line = String::new();
+            for (index, cell) in row.iter().enumerate() {
+                if index + 1 == row.len() {
+                    line.push_str(cell);
+                } else {
+                    line.push_str(&pad(cell, widths[index] + 2));
+                }
             }
-        }
-        println!("{}", line.trim_end());
-    }
-    Ok(())
+            line.trim_end().to_string()
+        })
+        .collect();
+    lines.join("\n")
 }
 
 fn pad(text: &str, width: usize) -> String {
@@ -949,4 +961,65 @@ fn show_config(init: bool, force: bool, json: bool) -> Result<()> {
         println!("  mouse                {}", config.mouse);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn table_lists_every_device_with_place_and_extra() {
+        let snapshot = crate::testing::snapshot();
+        let text = render_table(&list_rows(&snapshot));
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), snapshot.peripherals.len() + 1);
+        assert!(lines[0].starts_with("PORT"));
+        let storage = lines.iter().find(|line| line.contains("PSSD T7")).unwrap();
+        assert!(storage.contains("storage"), "{storage}");
+        assert!(storage.contains("sda1 mounted /media/user/T7"), "{storage}");
+        let mouse = lines
+            .iter()
+            .find(|line| line.contains("A5 Pro Max"))
+            .unwrap();
+        assert!(mouse.contains("5253:1020"), "{mouse}");
+        assert!(mouse.contains("/dev/hidraw2 MCHOSE 鼠标"), "{mouse}");
+        let dock = lines
+            .iter()
+            .find(|line| line.contains("USB4 Dock"))
+            .unwrap();
+        assert!(dock.contains("扩展坞"), "{dock}");
+        assert!(dock.contains("/坞上"), "{dock}");
+        let camera = lines
+            .iter()
+            .find(|line| line.contains("Integrated Camera"))
+            .unwrap();
+        assert!(camera.contains("内置"), "{camera}");
+    }
+
+    #[test]
+    fn json_shape_is_stable() {
+        let snapshot = crate::testing::snapshot();
+        let storage = peripheral_json(&snapshot.peripherals[0]);
+        assert_eq!(storage["sysfs"], json!("7-1.3"));
+        assert_eq!(storage["id"], json!("04e8:61f5"));
+        assert_eq!(storage["category"], json!("storage"));
+        assert_eq!(storage["place"], json!("external"));
+        assert_eq!(storage["disks"][0]["partitions"][0]["label"], json!("T7"));
+        assert_eq!(
+            storage["disks"][0]["partitions"][0]["mount"]["path"],
+            json!("/media/user/T7")
+        );
+        assert_eq!(storage["interfaces"][0]["driver"], json!("uas"));
+
+        let mouse = peripheral_json(&snapshot.peripherals[1]);
+        assert_eq!(mouse["category"], json!("input"));
+        assert_eq!(mouse["name"], json!("A5 Pro Max"));
+        assert_eq!(mouse["hids"][0]["node"], json!("/dev/hidraw2"));
+        assert_eq!(mouse["hids"][0]["protocol"], json!("MCHOSE 鼠标"));
+
+        let camera = peripheral_json(&snapshot.peripherals[3]);
+        assert_eq!(camera["place"], json!("internal"));
+        assert_eq!(camera["videos"][0], json!("Integrated Camera"));
+    }
 }
