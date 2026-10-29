@@ -12,8 +12,9 @@ use unicode_width::UnicodeWidthStr;
 use crate::battery;
 use crate::config::Config;
 use crate::hidraw;
-use crate::model::{Category, Disk, HidInfo, Peripheral};
+use crate::model::{Category, HidInfo, Peripheral};
 use crate::mount;
+use crate::ops;
 use crate::scan::{self, Snapshot};
 
 #[derive(Parser)]
@@ -494,8 +495,14 @@ fn parse_hex(text: &str) -> u16 {
 fn mount_device(selector: Option<&str>, json: bool) -> Result<()> {
     let snapshot = scan::scan();
     let (device, label) = match selector {
-        Some(selector) => find_mount_target(&snapshot, selector)?,
-        None => find_first_mount_target(&snapshot)?,
+        Some(selector) => {
+            let target = ops::mount_target_by(&snapshot, selector)?;
+            (target.device, target.label)
+        }
+        None => {
+            let target = ops::first_mount_target(&snapshot)?;
+            (target.device, target.label)
+        }
     };
     let point = mount::mount(&device, &label)?;
     if json {
@@ -516,8 +523,8 @@ fn mount_device(selector: Option<&str>, json: bool) -> Result<()> {
 fn umount_device(selector: Option<&str>, json: bool) -> Result<()> {
     let snapshot = scan::scan();
     let device = match selector {
-        Some(selector) => find_mounted(&snapshot, selector)?,
-        None => find_first_mounted(&snapshot)?,
+        Some(selector) => ops::mounted_by(&snapshot, selector)?,
+        None => ops::first_mounted(&snapshot)?,
     };
     mount::unmount(&device)?;
     if json {
@@ -534,8 +541,8 @@ fn umount_device(selector: Option<&str>, json: bool) -> Result<()> {
 fn eject_device(selector: Option<&str>, json: bool) -> Result<()> {
     let snapshot = scan::scan();
     let disk = match selector {
-        Some(selector) => find_disk(&snapshot, selector)?,
-        None => find_first_idle_disk(&snapshot)?,
+        Some(selector) => ops::disk_by(&snapshot, selector)?,
+        None => ops::first_idle_disk(&snapshot)?,
     };
     if disk.mounted() {
         bail!("{} 还有挂载点，请先卸载", disk.path);
@@ -550,145 +557,6 @@ fn eject_device(selector: Option<&str>, json: bool) -> Result<()> {
         println!("已安全弹出 {}", disk.path);
     }
     Ok(())
-}
-
-fn find_mount_target(snapshot: &Snapshot, selector: &str) -> Result<(String, String)> {
-    for peripheral in &snapshot.peripherals {
-        for disk in &peripheral.disks {
-            for partition in &disk.partitions {
-                if matches_device(selector, &partition.path, &partition.name) {
-                    if partition.mount.is_some() {
-                        bail!("{} 已经挂载", partition.path);
-                    }
-                    let label = if partition.label.is_empty() {
-                        partition.name.clone()
-                    } else {
-                        partition.label.clone()
-                    };
-                    return Ok((partition.path.clone(), label));
-                }
-            }
-            if matches_device(selector, &disk.path, &disk.name) {
-                if disk.partitions.is_empty() {
-                    let label = if disk.model.is_empty() {
-                        disk.name.clone()
-                    } else {
-                        disk.model.clone()
-                    };
-                    return Ok((disk.path.clone(), label));
-                }
-                let example = disk
-                    .partitions
-                    .first()
-                    .map(|partition| partition.path.clone())
-                    .unwrap_or_else(|| format!("{}{}", disk.path, 1));
-                bail!("{} 有分区，请指定分区（如 {}）", disk.path, example);
-            }
-        }
-    }
-    bail!("没有找到设备 {selector}")
-}
-
-fn find_first_mount_target(snapshot: &Snapshot) -> Result<(String, String)> {
-    let mut whole_disk = None;
-    for peripheral in &snapshot.peripherals {
-        for disk in &peripheral.disks {
-            for partition in &disk.partitions {
-                if partition.mount.is_none() {
-                    let label = if partition.label.is_empty() {
-                        partition.name.clone()
-                    } else {
-                        partition.label.clone()
-                    };
-                    return Ok((partition.path.clone(), label));
-                }
-            }
-            if disk.partitions.is_empty() && disk.mount.is_none() && disk.size > 0 {
-                let label = if disk.model.is_empty() {
-                    disk.name.clone()
-                } else {
-                    disk.model.clone()
-                };
-                whole_disk.get_or_insert((disk.path.clone(), label));
-            }
-        }
-    }
-    whole_disk.ok_or_else(|| anyhow!("没有可挂载的存储设备"))
-}
-
-fn find_mounted(snapshot: &Snapshot, selector: &str) -> Result<String> {
-    for peripheral in &snapshot.peripherals {
-        for disk in &peripheral.disks {
-            for partition in &disk.partitions {
-                if matches_device(selector, &partition.path, &partition.name) {
-                    if partition.mount.is_some() {
-                        return Ok(partition.path.clone());
-                    }
-                    bail!("{} 没有挂载", partition.path);
-                }
-            }
-            if matches_device(selector, &disk.path, &disk.name) {
-                if disk.mount.is_some() {
-                    return Ok(disk.path.clone());
-                }
-                bail!("{} 没有挂载", disk.path);
-            }
-        }
-    }
-    bail!("没有找到设备 {selector}")
-}
-
-fn find_first_mounted(snapshot: &Snapshot) -> Result<String> {
-    for peripheral in &snapshot.peripherals {
-        for disk in &peripheral.disks {
-            for partition in &disk.partitions {
-                if partition.mount.is_some() {
-                    return Ok(partition.path.clone());
-                }
-            }
-            if disk.mount.is_some() {
-                return Ok(disk.path.clone());
-            }
-        }
-    }
-    bail!("没有已挂载的存储设备")
-}
-
-fn find_disk<'a>(snapshot: &'a Snapshot, selector: &str) -> Result<&'a Disk> {
-    for peripheral in &snapshot.peripherals {
-        for disk in &peripheral.disks {
-            if matches_device(selector, &disk.path, &disk.name) {
-                return Ok(disk);
-            }
-            for partition in &disk.partitions {
-                if matches_device(selector, &partition.path, &partition.name) {
-                    return Ok(disk);
-                }
-            }
-        }
-    }
-    bail!("没有找到磁盘 {selector}")
-}
-
-fn find_first_idle_disk(snapshot: &Snapshot) -> Result<&Disk> {
-    let mut empty = None;
-    for peripheral in &snapshot.peripherals {
-        for disk in &peripheral.disks {
-            if disk.mounted() {
-                continue;
-            }
-            if disk.size > 0 {
-                return Ok(disk);
-            }
-            empty.get_or_insert(disk);
-        }
-    }
-    empty.ok_or_else(|| anyhow!("没有可弹出的磁盘"))
-}
-
-fn matches_device(selector: &str, path: &str, name: &str) -> bool {
-    let selector = selector.trim();
-    selector == path || selector == name || selector.trim_start_matches("/dev/") == name
 }
 
 // ─── probe ──────────────────────────────────────────────────────────────────

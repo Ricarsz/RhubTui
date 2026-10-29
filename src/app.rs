@@ -15,6 +15,7 @@ use crate::config::Config;
 use crate::mchose::Status;
 use crate::model::*;
 use crate::mount;
+use crate::ops;
 use crate::scan;
 use crate::theme::Palette;
 use crate::view::{self, Row};
@@ -479,13 +480,6 @@ impl App {
 
     // ─── partitions & actions ──────────────────────────────────────────────
 
-    fn partitions(peripheral: &Peripheral) -> Vec<&Partition> {
-        peripheral
-            .disks
-            .iter()
-            .flat_map(|disk| disk.partitions.iter())
-            .collect()
-    }
 
     fn part_index(&self, peripheral: &Peripheral) -> usize {
         let total: usize = peripheral.disks.iter().map(|d| d.partitions.len()).sum();
@@ -518,46 +512,22 @@ impl App {
             return;
         };
         let index = self.part_index(&peripheral);
-        let partitions = Self::partitions(&peripheral);
-
-        let (device, label, mounted) = match partitions.get(index) {
-            Some(partition) => (
-                partition.path.clone(),
-                if partition.label.is_empty() {
-                    partition.name.clone()
-                } else {
-                    partition.label.clone()
-                },
-                partition.mount.is_some(),
-            ),
-            None => match peripheral.disks.first() {
-                // No partition table: mount the whole device (superfloppy).
-                Some(disk) => (
-                    disk.path.clone(),
-                    if disk.model.is_empty() {
-                        disk.name.clone()
-                    } else {
-                        disk.model.clone()
-                    },
-                    disk.mount.is_some(),
-                ),
-                None => {
-                    self.set_status("该设备不是存储设备", true);
-                    return;
-                }
-            },
+        let Some(target) = ops::mount_target(&peripheral, index) else {
+            if ops::partitions(&peripheral).get(index).is_some_and(|p| p.mount.is_some())
+                || peripheral.disks.first().is_some_and(|disk| disk.mount.is_some())
+            {
+                self.set_status("已经挂载了", true);
+            } else {
+                self.set_status("该设备不是存储设备", true);
+            }
+            return;
         };
 
-        if mounted {
-            self.set_status("已经挂载了", true);
-            return;
-        }
-
-        let seq = self.start_action(format!("挂载 {device} …"));
+        let seq = self.start_action(format!("挂载 {} …", target.device));
         let tx = self.tx.clone();
         thread::spawn(move || {
-            let (ok, text) = match mount::mount(&device, &label) {
-                Ok(point) => (true, format!("已挂载 {device} → {point}")),
+            let (ok, text) = match mount::mount(&target.device, &target.label) {
+                Ok(point) => (true, format!("已挂载 {} → {point}", target.device)),
                 Err(error) => (false, format!("挂载失败：{error:#}")),
             };
             let _ = tx.send(Msg::Action { seq, ok, text });
@@ -572,22 +542,9 @@ impl App {
         let Some(peripheral) = self.selected_peripheral().cloned() else {
             return;
         };
-        let partitions = Self::partitions(&peripheral);
-        let current = self.part_index(&peripheral);
-        let target = partitions
-            .get(current)
-            .filter(|p| p.mount.is_some())
-            .or_else(|| partitions.iter().find(|p| p.mount.is_some()));
-
-        let device = match target {
-            Some(partition) => partition.path.clone(),
-            None => match peripheral.disks.iter().find(|d| d.mount.is_some()) {
-                Some(disk) => disk.path.clone(),
-                None => {
-                    self.set_status("没有已挂载的分区", true);
-                    return;
-                }
-            },
+        let Some(device) = ops::unmount_target(&peripheral, self.part_index(&peripheral)) else {
+            self.set_status("没有已挂载的分区", true);
+            return;
         };
 
         let seq = self.start_action(format!("卸载 {device} …"));
@@ -609,28 +566,13 @@ impl App {
         let Some(peripheral) = self.selected_peripheral().cloned() else {
             return;
         };
-        // Power off the disk that owns the selected partition.
-        let selected = self.part_index(&peripheral);
-        let mut offset = 0;
-        let disk = peripheral
-            .disks
-            .iter()
-            .find(|disk| {
-                let count = disk.partitions.len();
-                let hit = selected >= offset && selected < offset + count;
-                offset += count;
-                hit
-            })
-            .or_else(|| peripheral.disks.first());
-
-        let Some(disk) = disk else {
-            self.set_status("该设备不是存储设备", true);
-            return;
+        let disk = match ops::eject_disk(&peripheral, self.part_index(&peripheral)) {
+            Ok(disk) => disk,
+            Err(error) => {
+                self.set_status(error.to_string(), true);
+                return;
+            }
         };
-        if disk.mounted() {
-            self.set_status("请先卸载再弹出", true);
-            return;
-        }
 
         self.modal = Some(Confirm::Eject {
             device: disk.path.clone(),

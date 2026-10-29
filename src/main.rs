@@ -11,6 +11,7 @@ mod hidraw;
 mod keyboard;
 mod mchose;
 mod model;
+mod ops;
 mod mount;
 mod scan;
 #[cfg(test)]
