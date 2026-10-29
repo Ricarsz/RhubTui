@@ -3,10 +3,8 @@
 use std::collections::HashMap;
 use std::fs;
 
-
 use super::*;
 use crate::desc::ReportDescriptor;
-
 
 pub(crate) fn scan_hidraw() -> HashMap<String, Vec<HidInfo>> {
     let mut out: HashMap<String, Vec<HidInfo>> = HashMap::new();
@@ -85,4 +83,3 @@ fn score(info: &HidInfo) -> u8 {
         0
     }
 }
-

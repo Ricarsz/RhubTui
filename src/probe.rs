@@ -179,7 +179,6 @@ pub(crate) fn iface_of(path: &Path) -> Option<u8> {
     None
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

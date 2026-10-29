@@ -4,12 +4,10 @@ use std::collections::HashMap;
 use std::fs;
 use std::process::Command;
 
-
 use super::*;
 use std::ffi::CString;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-
 
 pub(crate) fn scan_disks(
     mounts: &HashMap<(u32, u32), MountPoint>,
@@ -265,7 +263,6 @@ fn parse_pairs(line: &str) -> Vec<(String, String)> {
     }
     out
 }
-
 
 #[cfg(test)]
 mod tests {

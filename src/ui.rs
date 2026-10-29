@@ -343,43 +343,22 @@ fn draw_confirm(frame: &mut Frame, area: Rect, modal: &Confirm, palette: Palette
 }
 
 fn draw_help(frame: &mut Frame, app: &mut App, area: Rect, palette: Palette) {
-    let lines = vec![
-        Line::from(Span::styled(
-            "按键",
-            Style::default()
-                .fg(palette.accent)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from("  ↑ ↓ / k j       选择设备"),
-        Line::from("  Tab / Shift+Tab 跳到上/下一分类"),
-        Line::from("  ← → / h l       选择存储分区"),
-        Line::from("  m / u           挂载 / 卸载选中分区"),
-        Line::from("  e               安全弹出（弹确认框）"),
-        Line::from("  PgUp/PgDn J/K     滚动详情"),
-        Line::from("  Ctrl+D / Ctrl+U   滚动详情"),
-        Line::from("  /               按名称/端口/VID:PID 过滤"),
-        Line::from("  b               重新读取电量"),
-        Line::from("  a               切换概览 / 高级详情"),
-        Line::from("  r               立即重新扫描设备"),
-        Line::from("  i               显示 / 隐藏内置设备"),
-        Line::from("  t               切换主题"),
-        Line::from("  ?               显示 / 隐藏本帮助"),
-        Line::from("  q / Esc / Ctrl+C  退出（有过滤时先清除）"),
-        Line::from(""),
-        Line::from(Span::styled(
-            "鼠标：滚轮滚动详情或列表，左键点击选择设备。",
-            Style::default().fg(palette.dim),
-        )),
-        Line::from(Span::styled(
-            "电量仅对 MCHOSE 接收器和标准 HID 电量通道可用。",
-            Style::default().fg(palette.dim),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            "  ? / Esc 关闭",
-            Style::default().fg(palette.faint),
-        )),
-    ];
+    let lines: Vec<Line<'static>> = crate::view::help::LINES
+        .iter()
+        .map(|line| match line {
+            crate::view::help::HelpLine::Heading(text) => Line::from(Span::styled(
+                *text,
+                Style::default()
+                    .fg(palette.accent)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            crate::view::help::HelpLine::Row(text) => Line::from(*text),
+            crate::view::help::HelpLine::Note(text) => {
+                Line::from(Span::styled(*text, Style::default().fg(palette.dim)))
+            }
+            crate::view::help::HelpLine::Blank => Line::from(""),
+        })
+        .collect();
 
     let body_width = lines
         .iter()

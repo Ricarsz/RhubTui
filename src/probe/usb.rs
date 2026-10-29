@@ -3,9 +3,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 
-
 use super::*;
-
 
 pub(crate) fn scan_usb() -> Vec<UsbDev> {
     let mut out = Vec::new();
@@ -335,7 +333,6 @@ fn parse_uevent(text: &str) -> Vec<(String, String)> {
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect()
 }
-
 
 #[cfg(test)]
 mod tests {

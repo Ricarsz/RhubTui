@@ -10,6 +10,7 @@ use crate::model::{
 };
 use crate::scan::Snapshot;
 
+pub mod help;
 pub mod json;
 pub mod table;
 

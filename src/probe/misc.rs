@@ -3,9 +3,7 @@
 use std::collections::HashMap;
 use std::fs;
 
-
 use super::*;
-
 
 pub(crate) fn scan_net() -> HashMap<String, Vec<NetIf>> {
     let mut out: HashMap<String, Vec<NetIf>> = HashMap::new();
@@ -108,4 +106,3 @@ pub(crate) fn scan_printers() -> HashMap<String, Vec<String>> {
     }
     out
 }
-

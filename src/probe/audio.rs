@@ -4,9 +4,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-
 use super::*;
-
 
 pub(crate) fn scan_audio() -> HashMap<String, AudioCard> {
     let text = fs::read_to_string("/proc/asound/cards").unwrap_or_default();
@@ -77,7 +75,6 @@ fn parse_cards(text: &str) -> Vec<AudioCard> {
     }
     out
 }
-
 
 #[cfg(test)]
 mod tests {
