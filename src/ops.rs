@@ -220,7 +220,7 @@ pub fn first_idle_disk(snapshot: &Snapshot) -> Result<&Disk> {
 }
 
 /// TUI：弹出所选分区所在的整盘；已挂载时拒绝。
-pub fn eject_disk<'a>(peripheral: &'a Peripheral, part: usize) -> Result<&'a Disk> {
+pub fn eject_disk(peripheral: &Peripheral, part: usize) -> Result<&Disk> {
     let mut offset = 0;
     let disk = peripheral
         .disks
@@ -239,7 +239,6 @@ pub fn eject_disk<'a>(peripheral: &'a Peripheral, part: usize) -> Result<&'a Dis
     Ok(disk)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,7 +254,9 @@ mod tests {
         let storage = &snapshot.peripherals[0];
         assert!(mount_target(storage, 0).is_none());
         assert_eq!(
-            mount_target_by(&snapshot, "/dev/sda1").unwrap_err().to_string(),
+            mount_target_by(&snapshot, "/dev/sda1")
+                .unwrap_err()
+                .to_string(),
             "/dev/sda1 已经挂载"
         );
     }
@@ -275,7 +276,9 @@ mod tests {
     #[test]
     fn disk_with_partitions_requires_a_partition() {
         let snapshot = snapshot();
-        let error = mount_target_by(&snapshot, "/dev/sda").unwrap_err().to_string();
+        let error = mount_target_by(&snapshot, "/dev/sda")
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("有分区，请指定分区"), "{error}");
     }
 
@@ -299,7 +302,10 @@ mod tests {
     fn eject_rejects_mounted_disk() {
         let snapshot = snapshot();
         let storage = &snapshot.peripherals[0];
-        assert_eq!(eject_disk(storage, 0).unwrap_err().to_string(), "请先卸载再弹出");
+        assert_eq!(
+            eject_disk(storage, 0).unwrap_err().to_string(),
+            "请先卸载再弹出"
+        );
     }
 
     #[test]

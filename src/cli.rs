@@ -7,15 +7,15 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use serde_json::json;
-use unicode_width::UnicodeWidthStr;
 
 use crate::battery;
 use crate::config::Config;
 use crate::hidraw;
-use crate::model::{Category, HidInfo, Peripheral};
+use crate::model::{HidInfo, Peripheral};
 use crate::mount;
 use crate::ops;
-use crate::scan::{self, Snapshot};
+use crate::scan;
+use crate::view;
 
 #[derive(Parser)]
 #[command(
@@ -95,274 +95,16 @@ pub fn run(cmd: Cmd, json: bool) -> Result<()> {
 fn list(json: bool) -> Result<()> {
     let snapshot = scan::scan();
     if json {
-        let peripherals: Vec<_> = snapshot.peripherals.iter().map(peripheral_json).collect();
+        let peripherals: Vec<_> = snapshot
+            .peripherals
+            .iter()
+            .map(view::json::peripheral)
+            .collect();
         println!("{}", serde_json::to_string_pretty(&peripherals)?);
         return Ok(());
     }
-    println!("{}", render_table(&list_rows(&snapshot)));
+    println!("{}", view::table::render(&view::table::rows(&snapshot)));
     Ok(())
-}
-
-fn list_rows(snapshot: &Snapshot) -> Vec<Vec<String>> {
-    let mut rows = vec![vec![
-        "PORT".to_string(),
-        "LINK".to_string(),
-        "ID".to_string(),
-        "TYPE".to_string(),
-        "PLACE".to_string(),
-        "NAME".to_string(),
-        "EXTRA".to_string(),
-    ]];
-    for peripheral in &snapshot.peripherals {
-        rows.push(vec![
-            peripheral.usb.sysfs.clone(),
-            peripheral.usb.link_label(),
-            peripheral.usb.id(),
-            category_tag(peripheral.category).to_string(),
-            place_tag(peripheral),
-            peripheral.name(),
-            extra_summary(peripheral),
-        ]);
-    }
-    rows
-}
-
-/// 对齐成纯文本表格；返回不含结尾换行的多行字符串。
-fn render_table(rows: &[Vec<String>]) -> String {
-    let columns = rows.first().map_or(0, Vec::len);
-    let mut widths = vec![0usize; columns];
-    for row in rows {
-        for (index, cell) in row.iter().enumerate() {
-            widths[index] = widths[index].max(UnicodeWidthStr::width(cell.as_str()));
-        }
-    }
-    let lines: Vec<String> = rows
-        .iter()
-        .map(|row| {
-            let mut line = String::new();
-            for (index, cell) in row.iter().enumerate() {
-                if index + 1 == row.len() {
-                    line.push_str(cell);
-                } else {
-                    line.push_str(&pad(cell, widths[index] + 2));
-                }
-            }
-            line.trim_end().to_string()
-        })
-        .collect();
-    lines.join("\n")
-}
-
-fn pad(text: &str, width: usize) -> String {
-    let mut text = text.to_string();
-    let used = UnicodeWidthStr::width(text.as_str());
-    if used < width {
-        text.push_str(&" ".repeat(width - used));
-    }
-    text
-}
-
-fn place_tag(peripheral: &Peripheral) -> String {
-    let mut tag = peripheral.usb.place.label().to_string();
-    if peripheral.usb.on_dock() {
-        tag.push_str("/坞上");
-    }
-    tag
-}
-
-fn extra_summary(peripheral: &Peripheral) -> String {
-    let mut extra = Vec::new();
-    let supported: Vec<&HidInfo> = peripheral
-        .hids
-        .iter()
-        .filter(|hid| hid.has_battery())
-        .collect();
-    for hid in &supported {
-        extra.push(format!("{} {}", hid.node, hid.protocol_name()));
-    }
-    if peripheral.hids.len() > supported.len() {
-        extra.push(format!("共 {} 个 HID 接口", peripheral.hids.len()));
-    }
-    for disk in &peripheral.disks {
-        for partition in &disk.partitions {
-            let state = match &partition.mount {
-                Some(mount) => format!("mounted {}", mount.path),
-                None => "unmounted".to_string(),
-            };
-            extra.push(format!("{} {}", partition.name, state));
-        }
-        if let Some(mount) = &disk.mount {
-            extra.push(format!("{} mounted {}", disk.name, mount.path));
-        }
-        if disk.partitions.is_empty() {
-            extra.push(format!("{} 无介质", disk.name));
-        }
-    }
-    if let Some(audio) = &peripheral.audio {
-        extra.push(format!("card {} {}", audio.index, audio.id));
-    }
-    for net in &peripheral.nets {
-        extra.push(net.label());
-    }
-    if !peripheral.videos.is_empty() {
-        extra.push(peripheral.videos.join(" "));
-    }
-    if !peripheral.ttys.is_empty() {
-        extra.push(peripheral.ttys.join(" "));
-    }
-    if !peripheral.printers.is_empty() {
-        extra.push(peripheral.printers.join(" "));
-    }
-    if peripheral.usb.is_hub() {
-        extra.push(format!(
-            "{} · {} 口 · {} 台",
-            peripheral
-                .usb
-                .hub_kind
-                .unwrap_or(crate::model::HubKind::Hub)
-                .label(),
-            peripheral.usb.maxchild,
-            peripheral.usb.children.len()
-        ));
-    }
-    if extra.is_empty() {
-        "-".to_string()
-    } else {
-        extra.join(" · ")
-    }
-}
-
-fn peripheral_json(peripheral: &Peripheral) -> serde_json::Value {
-    let disks: Vec<_> = peripheral
-        .disks
-        .iter()
-        .map(|disk| {
-            json!({
-                "name": disk.name,
-                "path": disk.path,
-                "size": disk.size,
-                "model": disk.model,
-                "serial": disk.serial,
-                "removable": disk.removable,
-                "transport": disk.transport,
-                "rotational": disk.rotational,
-                "ptable": disk.ptable,
-                "mount": disk.mount.as_ref().map(mount_json),
-                "partitions": disk.partitions.iter().map(|part| json!({
-                    "name": part.name,
-                    "path": part.path,
-                    "size": part.size,
-                    "fstype": part.fstype,
-                    "label": part.label,
-                    "uuid": part.uuid,
-                    "mount": part.mount.as_ref().map(mount_json),
-                })).collect::<Vec<_>>(),
-            })
-        })
-        .collect();
-
-    json!({
-        "sysfs": peripheral.usb.sysfs,
-        "bus": peripheral.usb.bus,
-        "devnum": peripheral.usb.devnum,
-        "port": peripheral.usb.port,
-        "root_port": peripheral.usb.root_port,
-        "depth": peripheral.usb.depth,
-        "chain": peripheral.usb.chain,
-        "place": if peripheral.usb.place.is_internal() { "internal" } else { "external" },
-        "place_reason": peripheral.usb.place_reason,
-        "attachment": peripheral.usb.attachment(),
-        "link": peripheral.usb.link_label(),
-        "dock": peripheral.usb.dock,
-        "hub_kind": peripheral.usb.hub_kind.map(|kind| match kind {
-            crate::model::HubKind::Hub => "hub",
-            crate::model::HubKind::Dock => "dock",
-        }),
-        "controller": peripheral.usb.controller.as_ref().map(|controller| json!({
-            "slot": controller.slot,
-            "driver": controller.driver,
-            "vendor": format!("{:04x}", controller.vendor),
-            "device": format!("{:04x}", controller.device),
-            "buses": controller.buses,
-        })),
-        "id": peripheral.usb.id(),
-        "vid": format!("{:04x}", peripheral.usb.vid),
-        "pid": format!("{:04x}", peripheral.usb.pid),
-        "name": peripheral.name(),
-        "category": category_tag(peripheral.category),
-        "speed": peripheral.usb.speed,
-        "usb_version": peripheral.usb.usb_version,
-        "bcd_device": peripheral.usb.bcd_device,
-        "manufacturer": peripheral.usb.manufacturer,
-        "product": peripheral.usb.product,
-        "serial": peripheral.usb.serial,
-        "power_ma": peripheral.usb.power_ma,
-        "authorized": peripheral.usb.authorized,
-        "ltm_capable": peripheral.usb.ltm_capable,
-        "parent": peripheral.usb.parent,
-        "parent_name": peripheral.usb.parent_name,
-        "children": peripheral.usb.children,
-        "interfaces": peripheral.usb.ifaces.iter().map(|iface| json!({
-            "number": iface.number,
-            "class": iface.class,
-            "subclass": iface.subclass,
-            "protocol": iface.protocol,
-            "function": iface.function(),
-            "driver": iface.driver,
-            "endpoints": iface.endpoints,
-        })).collect::<Vec<_>>(),
-        "hids": peripheral.hids.iter().map(|hid| json!({
-            "node": hid.node,
-            "iface": hid.iface,
-            "pages": hid.pages.iter().map(|p| format!("0x{p:04X}")).collect::<Vec<_>>(),
-            "protocol": hid.protocol_name(),
-            "battery_supported": hid.has_battery(),
-            "reports": {
-                "cmd": hid.cmd_out,
-                "data": hid.data_out,
-                "in": hid.in_len,
-            },
-        })).collect::<Vec<_>>(),
-        "disks": disks,
-        "audio": peripheral.audio.as_ref().map(|audio| json!({
-            "index": audio.index,
-            "id": audio.id,
-            "driver": audio.driver,
-            "name": audio.name,
-            "pcms": audio.pcms,
-        })),
-        "nets": peripheral.nets.iter().map(|net| json!({
-            "name": net.name,
-            "mac": net.mac,
-            "speed_mbps": net.speed_mbps,
-            "state": net.state,
-            "driver": net.driver,
-        })).collect::<Vec<_>>(),
-        "videos": peripheral.videos,
-        "ttys": peripheral.ttys,
-        "printers": peripheral.printers,
-    })
-}
-
-fn mount_json(mount: &crate::model::MountPoint) -> serde_json::Value {
-    json!({
-        "path": mount.path,
-        "read_only": mount.read_only,
-        "total": mount.total,
-        "free": mount.free,
-        "used_percent": mount.used_pct(),
-    })
-}
-
-fn category_tag(category: Category) -> &'static str {
-    match category {
-        Category::Storage => "storage",
-        Category::Input => "input",
-        Category::Audio => "audio",
-        Category::Network => "network",
-        Category::Hub => "hub",
-        Category::Other => "other",
-    }
 }
 
 // ─── battery ────────────────────────────────────────────────────────────────
@@ -839,7 +581,7 @@ mod tests {
     #[test]
     fn table_lists_every_device_with_place_and_extra() {
         let snapshot = crate::testing::snapshot();
-        let text = render_table(&list_rows(&snapshot));
+        let text = view::table::render(&view::table::rows(&snapshot));
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), snapshot.peripherals.len() + 1);
         assert!(lines[0].starts_with("PORT"));
@@ -868,7 +610,7 @@ mod tests {
     #[test]
     fn json_shape_is_stable() {
         let snapshot = crate::testing::snapshot();
-        let storage = peripheral_json(&snapshot.peripherals[0]);
+        let storage = view::json::peripheral(&snapshot.peripherals[0]);
         assert_eq!(storage["sysfs"], json!("7-1.3"));
         assert_eq!(storage["id"], json!("04e8:61f5"));
         assert_eq!(storage["category"], json!("storage"));
@@ -880,13 +622,13 @@ mod tests {
         );
         assert_eq!(storage["interfaces"][0]["driver"], json!("uas"));
 
-        let mouse = peripheral_json(&snapshot.peripherals[1]);
+        let mouse = view::json::peripheral(&snapshot.peripherals[1]);
         assert_eq!(mouse["category"], json!("input"));
         assert_eq!(mouse["name"], json!("A5 Pro Max"));
         assert_eq!(mouse["hids"][0]["node"], json!("/dev/hidraw2"));
         assert_eq!(mouse["hids"][0]["protocol"], json!("MCHOSE 鼠标"));
 
-        let camera = peripheral_json(&snapshot.peripherals[3]);
+        let camera = view::json::peripheral(&snapshot.peripherals[3]);
         assert_eq!(camera["place"], json!("internal"));
         assert_eq!(camera["videos"][0], json!("Integrated Camera"));
     }

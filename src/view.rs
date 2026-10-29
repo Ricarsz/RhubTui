@@ -10,6 +10,9 @@ use crate::model::{
 };
 use crate::scan::Snapshot;
 
+pub mod json;
+pub mod table;
+
 /// 语义色调，由具体主题映射成颜色。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tone {

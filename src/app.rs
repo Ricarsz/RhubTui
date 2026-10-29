@@ -480,7 +480,6 @@ impl App {
 
     // ─── partitions & actions ──────────────────────────────────────────────
 
-
     fn part_index(&self, peripheral: &Peripheral) -> usize {
         let total: usize = peripheral.disks.iter().map(|d| d.partitions.len()).sum();
         if total == 0 {
@@ -513,8 +512,13 @@ impl App {
         };
         let index = self.part_index(&peripheral);
         let Some(target) = ops::mount_target(&peripheral, index) else {
-            if ops::partitions(&peripheral).get(index).is_some_and(|p| p.mount.is_some())
-                || peripheral.disks.first().is_some_and(|disk| disk.mount.is_some())
+            if ops::partitions(&peripheral)
+                .get(index)
+                .is_some_and(|p| p.mount.is_some())
+                || peripheral
+                    .disks
+                    .first()
+                    .is_some_and(|disk| disk.mount.is_some())
             {
                 self.set_status("已经挂载了", true);
             } else {
